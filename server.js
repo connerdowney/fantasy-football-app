@@ -24,6 +24,8 @@ function log(level, msg, meta = {}) {
   if (level === 'ERROR') console.error(line.trim());
 }
 
+const app = express();
+
 // Request logger middleware
 app.use((req, res, next) => {
   const start = Date.now();
@@ -34,8 +36,6 @@ app.use((req, res, next) => {
   });
   next();
 });
-
-const app = express();
 app.use(express.json({ limit: '10mb' }));
 const PORT = 3001;
 const CREDS_PATH = path.join(__dirname, 'credentials.json');
