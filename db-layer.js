@@ -946,8 +946,6 @@ module.exports = {
   saveYahooCache,
   saveYahooCacheBulk,
   loadYahooCache,
-  getYahooCacheTimestamp,
-
   // Weekly recap & trends
   saveWeeklyRecap,
   getWeeklyRecaps,

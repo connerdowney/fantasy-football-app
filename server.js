@@ -244,6 +244,7 @@ app.get('/proxy/sleeper/players', (_req, res) => {
 });
 
 const projectionsCache = {};
+const PROJECTIONS_CACHE_MAX = 20;
 
 app.get('/proxy/sleeper/projections/:season/:week', (req, res) => {
   const { season, week } = req.params;
@@ -262,6 +263,12 @@ app.get('/proxy/sleeper/projections/:season/:week', (req, res) => {
       try {
         const data = JSON.parse(body);
         projectionsCache[key] = { data, time: now };
+        // Evict oldest entries if cache exceeds max
+        const keys = Object.keys(projectionsCache);
+        if (keys.length > PROJECTIONS_CACHE_MAX) {
+          const oldest = keys.sort((a, b) => projectionsCache[a].time - projectionsCache[b].time);
+          for (let i = 0; i < keys.length - PROJECTIONS_CACHE_MAX; i++) delete projectionsCache[oldest[i]];
+        }
         res.json(data);
       } catch {
         res.status(502).json({ error: 'Failed to parse projections' });
@@ -321,7 +328,7 @@ function extCacheFresh() {
 
 /** CORS middleware just for the extension endpoint (safe: only reachable from localhost) */
 app.use('/proxy/yahoo/extension', (req, res, next) => {
-  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Origin', 'http://localhost:3001');
   res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -428,8 +435,9 @@ const fpCache = {}; // key: `${week}-${scoring}` → { data, time }
 const FP_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 /** Fetch raw HTML over HTTPS with browser-like headers */
-function fetchHTML(url) {
+function fetchHTML(url, _depth = 0) {
   return new Promise((resolve, reject) => {
+    if (_depth > 5) return reject(new Error('Too many redirects'));
     const opts = {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -440,9 +448,9 @@ function fetchHTML(url) {
       },
     };
     https.get(url, opts, (res) => {
-      // Follow single redirect
+      // Follow redirects (max 5)
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchHTML(res.headers.location).then(resolve).catch(reject);
+        return fetchHTML(res.headers.location, _depth + 1).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
         return reject(new Error(`HTTP ${res.statusCode} from ${url}`));

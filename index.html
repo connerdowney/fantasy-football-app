@@ -1033,6 +1033,26 @@ header h1 {
 
 
 /* ── 14. Injury Alert Strip ───────────────────────────────── */
+.starters-motw-row {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  align-items: stretch;
+}
+.starters-motw-row .injury-alert-strip {
+  flex: 1;
+  margin-bottom: 0;
+}
+.starters-motw-row .motw-strip {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+  min-width: 280px;
+}
+@media (max-width: 900px) {
+  .starters-motw-row { flex-direction: column; }
+  .starters-motw-row .motw-strip { min-width: unset; }
+}
+
 .injury-alert-strip {
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -1199,17 +1219,36 @@ header h1 {
 .leagues-container.layout-cols-5 .win-prob-label { font-size: 9px; }
 .leagues-container.layout-cols-5 .league-name { font-size: 9px; }
 
-/* Lone card on last row spans full width */
-.leagues-container.layout-cols-2 > *:last-child:nth-child(odd)  { max-width: 100%; flex: 1 1 100%; }
-.leagues-container.layout-cols-3 > *:last-child:nth-child(3n+1) { max-width: 100%; flex: 1 1 100%; }
-.leagues-container.layout-cols-3 > *:last-child:nth-child(3n+2) { max-width: calc(50% - 5px); flex: 1 1 calc(50% - 5px); }
-.leagues-container.layout-cols-4 > *:last-child:nth-child(4n+1) { max-width: 100%; flex: 1 1 100%; }
-.leagues-container.layout-cols-4 > *:last-child:nth-child(4n+2) { max-width: calc(50% - 5px); flex: 1 1 calc(50% - 5px); }
-.leagues-container.layout-cols-4 > *:last-child:nth-child(4n+3) { max-width: calc(75% - 7px); flex: 1 1 calc(75% - 7px); }
-.leagues-container.layout-cols-5 > *:last-child:nth-child(5n+1) { max-width: 100%; flex: 1 1 100%; }
-.leagues-container.layout-cols-5 > *:last-child:nth-child(5n+2) { max-width: calc(40% - 4px); flex: 1 1 calc(40% - 4px); }
-.leagues-container.layout-cols-5 > *:last-child:nth-child(5n+3) { max-width: calc(60% - 6px); flex: 1 1 calc(60% - 6px); }
-.leagues-container.layout-cols-5 > *:last-child:nth-child(5n+4) { max-width: calc(80% - 8px); flex: 1 1 calc(80% - 8px); }
+/* ── Remainder-row rules (5 leagues) ──
+ * Layout 1: all stacked full width (handled by base rules)
+ * Layout 2: 2 + 2 + 1 full width
+ * Layout 3: 3 + 2 evenly split
+ * Layout 4: 4 + 1 full width (wide card styling)
+ * Layout 5: all 5 columns (handled by base rules)
+ */
+
+/* Layout 2 remainder: last card on an odd count gets full width */
+.leagues-container.layout-cols-2 > *:last-child:nth-child(odd) {
+  max-width: 100%; flex: 1 1 100%;
+}
+
+/* Layout 3 remainder: 5 cards = 3+2, last 2 split evenly */
+.leagues-container.layout-cols-3 > *:nth-child(n+4):nth-last-child(-n+2) {
+  flex: 1 1 calc(50% - 7px); max-width: calc(50% - 7px);
+}
+
+/* Layout 4 remainder: 5 cards = 4+1, last card full width with wide styling */
+.leagues-container.layout-cols-4 > *:nth-child(5):last-child {
+  max-width: 100%; flex: 1 1 100%;
+}
+.leagues-container.layout-cols-4 > *:nth-child(5):last-child .team-score { font-size: 28px; }
+.leagues-container.layout-cols-4 > *:nth-child(5):last-child .team-name { font-size: 12px; }
+.leagues-container.layout-cols-4 > *:nth-child(5):last-child .league-header { padding: 12px 16px; gap: 10px; }
+.leagues-container.layout-cols-4 > *:nth-child(5):last-child .detail-grid { grid-template-columns: 1fr 1fr; }
+.leagues-container.layout-cols-4 > *:nth-child(5):last-child .detail-side + .detail-side {
+  border-left: 1px solid var(--card-border); border-top: none;
+}
+
 .leagues-container.layout-cols-5 .detail-grid { grid-template-columns: 1fr; }
 .leagues-container.layout-cols-5 .detail-side + .detail-side { border-left: none; border-top: 1px solid var(--card-border); }
 
@@ -1582,12 +1621,12 @@ header h1 {
 
 /* ── 18. Sections Grid & Widgets ──────────────────────────── */
 .sections-grid {
-  max-width: 900px;
-  margin: var(--space-xs) auto 0;
-  padding: 0 var(--space-md);
+  margin: var(--space-lg) 0 0;
+  padding: var(--space-md) 0 0;
+  border-top: 1px solid var(--card-border);
 }
 .sections-grid.grid-tiles {
-  max-width: 1400px;
+  max-width: none;
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: var(--space-sm);
@@ -1654,7 +1693,7 @@ header h1 {
   background: var(--subtle-hover);
 }
 .sections-grid.widget-tiles {
-  max-width: 1400px;
+  max-width: none;
   display: grid;
   grid-template-columns: repeat(var(--tile-cols, 2), 1fr);
   gap: var(--space-sm);
@@ -3134,7 +3173,7 @@ header h1 {
 <div id="toast-container" class="toast-container"></div>
 
 <header>
-  <h1>Fantasy Football Dashboard <span style="font-size:10px;font-weight:500;opacity:0.6;vertical-align:super;">v1.1</span></h1>
+  <h1>Fantasy Football Dashboard</h1>
   <nav class="main-nav" id="main-nav">
     <button class="main-nav-tab active" data-view="home" onclick="switchMainView('home')">Home</button>
     <button class="main-nav-tab" data-view="scores" onclick="switchMainView('scores')">Scores</button>
@@ -3172,9 +3211,11 @@ header h1 {
 </div>
 <div id="top-performers-bar" class="top-performers-grid"></div>
 <div id="ticker-bar" class="ticker-bar"></div>
-<div id="injury-alert-strip" class="injury-alert-strip"></div>
+<div class="starters-motw-row">
+  <div id="injury-alert-strip" class="injury-alert-strip"></div>
+  <div id="motw-strip" class="motw-strip"></div>
+</div>
 <div id="scoreboard-strip" class="scoreboard-strip"></div>
-<div id="motw-strip" class="motw-strip"></div>
 <div id="leagues-container" class="leagues-container"></div>
 
 <div id="sections-grid" class="sections-grid">
