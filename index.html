@@ -3215,7 +3215,7 @@ header h1 {
   <div id="injury-alert-strip" class="injury-alert-strip"></div>
   <div id="motw-strip" class="motw-strip"></div>
 </div>
-<div id="scoreboard-strip" class="scoreboard-strip"></div>
+<div id="scoreboard-strip" class="scoreboard-strip" style="display:none;"></div>
 <div id="leagues-container" class="leagues-container"></div>
 
 <div id="sections-grid" class="sections-grid">
@@ -3366,6 +3366,7 @@ const STATE = {
   mainView: 'home',    // active main nav: home | scores | widgets | news
   fpData: null,        // FantasyPros ECR projections for current week
   fpLookupMap: null,   // normalized name:pos -> player for fast lookup
+  projLookupMap: null, // Sleeper projections name:pos -> {projPts, injuryStatus, posRank}
   news: null,          // cached /api/news payload
 };
 
@@ -3559,6 +3560,7 @@ async function handleLoad() {
     ]);
     STATE.players = players;
     STATE.projections = projections;
+    buildProjLookup();
     // Kick off FantasyPros in parallel — non-blocking; failure is silent
     loadFantasyPros().catch(() => {});
     loadNews().catch(() => {});
@@ -3586,7 +3588,7 @@ async function handleLoad() {
     snapshotScores();
     renderAll();
     flashChangedScores();
-    setStatus(`Week ${STATE.week} | Updated ${timeStr()}`, true);
+    setStatus(`Week ${STATE.week} | Updated ${timeStr()}`, checkForScores());
 
     // Auto-snapshot: save this week's data to SQLite for historical tracking
     autoSnapshotToServer();
@@ -4028,6 +4030,7 @@ function enrichYahooLeague(league, sbData) {
 async function refreshAll() {
   try {
     STATE.projections = await fetchJSON(`/proxy/sleeper/projections/${STATE.season}/${STATE.week}`);
+    buildProjLookup();
     loadFantasyPros().catch(() => {}); // refresh FP ECR in background
     loadNews().catch(() => {});        // refresh news in background
 
@@ -4056,7 +4059,7 @@ async function refreshAll() {
     STATE.optimalWeek = STATE.recapWeek;
 
     renderAll();
-    setStatus(`Week ${STATE.week} | Updated ${timeStr()}`, true);
+    setStatus(`Week ${STATE.week} | Updated ${timeStr()}`, checkForScores());
   } catch {
     setStatus('Refresh failed', false);
   }
@@ -4267,7 +4270,7 @@ function renderAll() {
   // v1.1: Injury alert strip + last updated + status
   renderInjuryAlertStrip();
   updateLastUpdated();
-  setStatusLive();
+  if (checkForScores()) setStatusLive();
 
   // Waiver Wire — show section if any league data exists
   const wwSection = document.getElementById('waivers-section');
@@ -6118,19 +6121,21 @@ async function renderWaivers() {
   }
 
   const rows = top.map((a, i) => {
-    const _inj = normInj(a.injuryStatus);
+    const sl = projLookup(a.name, a.pos);
+    const _inj = normInj(sl?.injuryStatus || a.injuryStatus);
     const injBadge = _inj
-      ? `<span class="ww-injury ${_inj}">${_inj}${a.injuryNote ? ' - ' + esc(a.injuryNote) : ''}</span>`
+      ? injBadgeHTML(sl?.injuryStatus || a.injuryStatus, sl?.injuryBodyPart || a.injuryNote)
       : '';
     const posClass = `pos-${a.pos}`;
     const fp = fpLookup(a.name, a.pos);
-    const fpBadge = fp ? fpBadgeHTML(fp) : '<span class="fp-rank fp-none" title="Not in FP ECR">—</span>';
+    const fpBadge = fp ? fpBadgeHTML(fp, { showPts: false }) : '<span class="fp-rank fp-none" title="Not in FP ECR">—</span>';
+    const wwPts = sl?.projPts || a.projPts || 0;
     return `<tr>
       <td style="width:32px;text-align:center;color:var(--text-muted);font-size:12px;">${i + 1}</td>
       <td><span class="player-pos ${posClass}" style="display:inline-block;margin-right:8px;">${a.pos}</span>${esc(a.name)}${injBadge}</td>
       <td style="color:var(--text-muted);font-size:12px;">${esc(a.team)}</td>
       <td class="num">${fpBadge}</td>
-      <td class="num" style="font-weight:600;">${a.projPts.toFixed(1)}</td>
+      <td class="num" style="font-weight:600;">${wwPts.toFixed(1)}</td>
     </tr>`;
   }).join('');
 
@@ -6293,20 +6298,20 @@ function renderNews() {
 
   // ─── Left: trending adds + drops tables ──────────────────────────
   const addRows = adds.slice(0, 15).map((p, i) => {
-    const _trendInj = normInj(p.injuryStatus);
-    const injBadge = _trendInj
-      ? `<span class="ww-injury ${_trendInj}" style="margin-left:4px;font-size:10px;">${_trendInj}</span>`
-      : '';
+    const sl = projLookup(p.name, p.pos);
+    const _trendInj = normInj(sl?.injuryStatus || p.injuryStatus);
+    const injBdg = _trendInj ? injBadgeHTML(sl?.injuryStatus || p.injuryStatus, sl?.injuryBodyPart) : '';
     const fpAdd = fpLookup(p.name, p.pos);
-    const fpAddBadge = fpAdd ? fpBadgeHTML(fpAdd) : '<span style="color:var(--text-muted);font-size:11px;">—</span>';
-    const fpAddPts = fpAdd && fpAdd.fpPts && parseFloat(fpAdd.fpPts) > 0
-      ? '<span style="font-size:11px;font-weight:600;color:var(--accent);">' + parseFloat(fpAdd.fpPts).toFixed(1) + '</span>'
+    const fpAddBadge = fpAdd ? fpBadgeHTML(fpAdd, { showPts: false }) : '<span style="color:var(--text-muted);font-size:11px;">—</span>';
+    const pts = sl?.projPts || (fpAdd?.fpPts ? parseFloat(fpAdd.fpPts) : 0);
+    const ptsCell = pts > 0
+      ? '<span style="font-size:11px;font-weight:600;color:var(--accent);">' + pts.toFixed(1) + '</span>'
       : '<span style="color:var(--text-muted);font-size:11px;">—</span>';
     return `<tr>
       <td style="color:var(--text-muted);font-size:11px;width:20px;">${i + 1}</td>
-      <td><span class="player-pos pos-${esc(p.pos)}" style="font-size:10px;padding:1px 4px;">${esc(p.pos)}</span> ${esc(p.name)}${injBadge}</td>
+      <td><span class="player-pos pos-${esc(p.pos)}" style="font-size:10px;padding:1px 4px;">${esc(p.pos)}</span> ${esc(p.name)}${injBdg}</td>
       <td style="width:44px;">${fpAddBadge}</td>
-      <td style="width:40px;text-align:right;">${fpAddPts}</td>
+      <td style="width:40px;text-align:right;">${ptsCell}</td>
       <td style="text-align:right;width:44px;"><span class="trend-count-add">+${p.count}</span></td>
     </tr>`;
   }).join('');
@@ -6357,9 +6362,13 @@ function renderNews() {
 
   const newsCards = filteredNews.slice(0, 30).map(function(item) {
     const fpNewsPlayer = item.player && item.player.name ? fpLookup(item.player.name, item.player.pos) : null;
-    const fpNewsBadge = fpNewsPlayer ? ' ' + fpBadgeHTML(fpNewsPlayer) : '';
-    const fpProjLine = fpNewsPlayer && fpNewsPlayer.fpPts && parseFloat(fpNewsPlayer.fpPts) > 0
-      ? '<div style="font-size:11px;color:var(--accent);margin-top:2px;font-weight:600;">Proj ' + parseFloat(fpNewsPlayer.fpPts).toFixed(1) + ' pts' + (fpNewsPlayer.posRank ? ' \u00b7 ' + fpNewsPlayer.pos + fpNewsPlayer.posRank : '') + '</div>'
+    const slNewsPlayer = item.player && item.player.name ? projLookup(item.player.name, item.player.pos) : null;
+    const fpNewsBadge = fpNewsPlayer ? ' ' + fpBadgeHTML(fpNewsPlayer, { showPts: false }) : '';
+    const newsInjBadge = slNewsPlayer && slNewsPlayer.injuryStatus ? injBadgeHTML(slNewsPlayer.injuryStatus, slNewsPlayer.injuryBodyPart) : '';
+    const _nPts = slNewsPlayer && slNewsPlayer.projPts ? slNewsPlayer.projPts : (fpNewsPlayer && fpNewsPlayer.fpPts ? parseFloat(fpNewsPlayer.fpPts) : 0);
+    const _nPosRk = slNewsPlayer && slNewsPlayer.posRank ? slNewsPlayer.pos + slNewsPlayer.posRank : (fpNewsPlayer && fpNewsPlayer.posRank ? fpNewsPlayer.pos + fpNewsPlayer.posRank : '');
+    const fpProjLine = _nPts > 0
+      ? '<div style="font-size:11px;color:var(--accent);margin-top:2px;font-weight:600;">Proj ' + _nPts.toFixed(1) + ' pts' + (_nPosRk ? ' \u00b7 ' + _nPosRk : '') + '</div>'
       : '';
     const srcBadge = item.source === 'espn'
       ? '<span class="news-src-espn">ESPN</span>'
@@ -6372,7 +6381,7 @@ function renderNews() {
     const myDot = isMyPlayer ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:4px;vertical-align:middle;" title="On your roster"></span>'
       : isOppPlayer ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--red);margin-right:4px;vertical-align:middle;" title="Opponent\'s player"></span>' : '';
     const playerInfo = playerName
-      ? myDot + srcBadge + '<span class="player-pos pos-'+esc(playerPos)+'" style="font-size:10px;padding:1px 4px;">'+(playerPos||'NFL')+'</span> <span class="news-item-player">'+esc(playerName)+playerTeam+'</span>'+fpNewsBadge
+      ? myDot + srcBadge + '<span class="player-pos pos-'+esc(playerPos)+'" style="font-size:10px;padding:1px 4px;">'+(playerPos||'NFL')+'</span> <span class="news-item-player">'+esc(playerName)+playerTeam+'</span>'+newsInjBadge+fpNewsBadge
       : srcBadge + '<span class="news-item-player">NFL News</span>';
     const desc = item.description
       ? '<div class="news-item-desc">'+esc(item.description).slice(0,220)+(item.description.length>220?'…':'')+'</div>'
@@ -6481,6 +6490,59 @@ function fpBadgeHTML(fpPlayer, { showPts = true } = {}) {
     ? `<span style="color:var(--text-muted);font-size:10px;margin-left:3px;white-space:nowrap;font-weight:400;">· ${pts.toFixed(1)}</span>`
     : '';
   return `<span class="fp-rank${cls}" title="${title}">${pos}${rank}</span>${ptsSuffix}`;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Sleeper Projections + Injury lookup (API-based, no scraping)
+// ═══════════════════════════════════════════════════════════════════
+function buildProjLookup() {
+  if (!STATE.players || !STATE.projections) return;
+  STATE.projLookupMap = {};
+  const ptsField = 'pts_half_ppr';
+  for (const [pid, proj] of Object.entries(STATE.projections)) {
+    const pts = proj[ptsField];
+    if (!pts || pts <= 0) continue;
+    const p = STATE.players[pid];
+    if (!p || !p.full_name || !p.position) continue;
+    if (!['QB','RB','WR','TE','K','DEF'].includes(p.position)) continue;
+    const key = normalizeFPName(p.full_name) + ':' + p.position;
+    if (!STATE.projLookupMap[key]) {
+      STATE.projLookupMap[key] = {
+        name: p.full_name, pos: p.position, team: p.team || '',
+        projPts: Math.round(pts * 100) / 100,
+        injuryStatus: p.injury_status || null,
+        injuryBodyPart: p.injury_body_part || null,
+      };
+    }
+  }
+  // Sort and assign position ranks
+  const byPos = {};
+  for (const entry of Object.values(STATE.projLookupMap)) {
+    (byPos[entry.pos] = byPos[entry.pos] || []).push(entry);
+  }
+  for (const arr of Object.values(byPos)) {
+    arr.sort((a, b) => b.projPts - a.projPts);
+    arr.forEach((e, i) => { e.posRank = i + 1; });
+  }
+  console.log(`[Proj] Built lookup: ${Object.keys(STATE.projLookupMap).length} players`);
+}
+
+function projLookup(name, pos) {
+  if (!STATE.projLookupMap) return null;
+  const p = (pos === 'DEF' || pos === 'DST') ? 'DEF' : pos;
+  return STATE.projLookupMap[normalizeFPName(name) + ':' + p] || null;
+}
+
+function injBadgeHTML(status, bodyPart) {
+  const inj = normInj(status);
+  if (!inj) return '';
+  const tip = bodyPart ? `${inj} - ${bodyPart}` : inj;
+  return `<span class="ww-injury ${inj}" title="${esc(tip)}" style="margin-left:4px;font-size:10px;">${inj}</span>`;
+}
+
+function projPtsHTML(player) {
+  if (!player || !player.projPts || player.projPts <= 0) return '';
+  return `<span style="font-size:11px;font-weight:600;color:var(--accent);">${player.projPts.toFixed(1)}</span>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════

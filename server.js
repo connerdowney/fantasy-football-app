@@ -36,7 +36,7 @@ app.use((req, res, next) => {
   });
   next();
 });
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 const PORT = 3001;
 const CREDS_PATH = path.join(__dirname, 'credentials.json');
 
@@ -335,7 +335,7 @@ app.use('/proxy/yahoo/extension', (req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '10mb' })); // parse JSON bodies for the extension POST
+app.use(express.json({ limit: '50mb' })); // parse JSON bodies for the extension POST
 
 // ── SQLite historical data layer ──
 db.initDB();
@@ -559,6 +559,121 @@ app.get('/api/fantasypros/projections/:week', async (req, res) => {
   console.log(`[FP] Week ${week} ${scoring}: ${results.length} total players cached`);
   res.json(payload);
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// Projections API — Sleeper projections + injury data (no scraping)
+// ═══════════════════════════════════════════════════════════════════
+
+const projApiCache = {};
+const PROJ_API_TTL = 30 * 60 * 1000; // 30 min
+
+app.get('/api/projections/:week', async (req, res) => {
+  const week = parseInt(req.params.week, 10) || 1;
+  const season = req.query.season || '2026';
+  const scoring = req.query.scoring || 'half_ppr'; // half_ppr | ppr | std
+  const key = `${season}-${week}-${scoring}`;
+  const now = Date.now();
+
+  if (projApiCache[key] && now - projApiCache[key].time < PROJ_API_TTL) {
+    return res.json(projApiCache[key].data);
+  }
+
+  try {
+    // Fetch Sleeper projections + players in parallel (reuse existing caches)
+    const [projRes, playersRes] = await Promise.all([
+      fetchHttps(`https://api.sleeper.app/v1/projections/nfl/regular/${season}/${week}`),
+      getSleeperPlayers(),
+    ]);
+
+    const projections = JSON.parse(projRes);
+    const players = playersRes;
+    const ptsField = scoring === 'ppr' ? 'pts_ppr' : scoring === 'std' ? 'pts_std' : 'pts_half_ppr';
+
+    const result = [];
+    for (const [pid, proj] of Object.entries(projections)) {
+      const pts = proj[ptsField];
+      if (!pts || pts <= 0) continue;
+
+      const p = players[pid];
+      if (!p || !p.full_name || !p.position) continue;
+      // Only fantasy-relevant positions
+      if (!['QB', 'RB', 'WR', 'TE', 'K', 'DEF'].includes(p.position)) continue;
+
+      result.push({
+        name: p.full_name,
+        pos: p.position,
+        team: p.team || '',
+        projPts: Math.round(pts * 100) / 100,
+        stats: {
+          passYd: proj.pass_yd || 0,
+          passTd: proj.pass_td || 0,
+          passInt: proj.pass_int || 0,
+          rushYd: proj.rush_yd || 0,
+          rushTd: proj.rush_td || 0,
+          rushAtt: proj.rush_att || 0,
+          recYd: proj.rec_yd || 0,
+          recTd: proj.rec_td || 0,
+          rec: proj.rec || 0,
+          recTgt: proj.rec_tgt || 0,
+          fgm: proj.fgm || 0,
+          xpm: proj.xpm || 0,
+        },
+        injuryStatus: p.injury_status || null,
+        injuryBodyPart: p.injury_body_part || null,
+      });
+    }
+
+    // Sort by projected points desc
+    result.sort((a, b) => b.projPts - a.projPts);
+
+    // Add position rank
+    const posCount = {};
+    for (const p of result) {
+      posCount[p.pos] = (posCount[p.pos] || 0) + 1;
+      p.posRank = posCount[p.pos];
+    }
+
+    const payload = { week: Number(week), season, scoring, players: result, generated: new Date().toISOString() };
+    projApiCache[key] = { data: payload, time: now };
+    log('INFO', `[Proj] Week ${week}: ${result.length} players`, { scoring });
+    res.json(payload);
+  } catch (err) {
+    log('ERROR', `[Proj] Failed: ${err.message}`);
+    res.status(502).json({ error: 'Projections fetch failed', detail: err.message });
+  }
+});
+
+// Helper: fetch HTTPS as string (promise-based)
+function fetchHttps(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let body = '';
+      res.on('data', (chunk) => (body += chunk));
+      res.on('end', () => resolve(body));
+    }).on('error', reject);
+  });
+}
+
+// Helper: get Sleeper players (reuses existing cache)
+function getSleeperPlayers() {
+  return new Promise((resolve, reject) => {
+    const now = Date.now();
+    if (playersCache && now - playersCacheTime < PLAYERS_CACHE_TTL) {
+      return resolve(playersCache);
+    }
+    https.get('https://api.sleeper.app/v1/players/nfl', (res) => {
+      let body = '';
+      res.on('data', (chunk) => (body += chunk));
+      res.on('end', () => {
+        try {
+          playersCache = JSON.parse(body);
+          playersCacheTime = now;
+          resolve(playersCache);
+        } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Lineup API — clean JSON for pasting into Claude chats
