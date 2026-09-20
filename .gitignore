@@ -39,3 +39,4 @@ css-rebuild.css
 
 # SSL certs
 .certs/
+logs/

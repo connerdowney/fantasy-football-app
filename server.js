@@ -5,6 +5,36 @@ const fs = require('fs');
 const https = require('https');
 const db = require('./db-layer');
 
+// ═══════════════════════════════════════════════════════════════════
+// Debug Logger
+// ═══════════════════════════════════════════════════════════════════
+const LOG_DIR = path.join(__dirname, 'logs');
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR);
+
+function getLogPath() {
+  const d = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  return path.join(LOG_DIR, `server-${d}.log`);
+}
+
+function log(level, msg, meta = {}) {
+  const ts = new Date().toISOString();
+  const metaStr = Object.keys(meta).length ? ' ' + JSON.stringify(meta) : '';
+  const line = `[${ts}] [${level}] ${msg}${metaStr}\n`;
+  try { fs.appendFileSync(getLogPath(), line); } catch (_) {}
+  if (level === 'ERROR') console.error(line.trim());
+}
+
+// Request logger middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    const lvl = res.statusCode >= 400 ? 'WARN' : 'INFO';
+    log(lvl, `${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms`);
+  });
+  next();
+});
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 const PORT = 3001;
@@ -179,53 +209,6 @@ app.get('/proxy/espn/:leagueId/:week', (req, res) => {
   }).on('error', (err) => {
     res.status(502).json({ error: 'ESPN fetch failed', detail: err.message });
   });
-});
-
-// Temp debug endpoint — returns ESPN team/matchup structure
-app.get('/debug/espn/:leagueId', (req, res) => {
-  const creds = loadCredentials();
-  const { leagueId } = req.params;
-  const year = new Date().getFullYear();
-  const espnUrl =
-    `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${year}` +
-    `/segments/0/leagues/${leagueId}` +
-    `?view=mMatchup&view=mRoster&view=mMatchupScore&view=mTeam&scoringPeriodId=1`;
-
-  https.get(espnUrl, {
-    headers: { Cookie: `espn_s2=${creds.espn_s2}; SWID=${creds.SWID}`, Accept: 'application/json' },
-  }, (upstream) => {
-    let body = '';
-    upstream.on('data', (c) => (body += c));
-    upstream.on('end', () => {
-      try {
-        const d = JSON.parse(body);
-        const out = {
-          leagueName: d.settings?.name,
-          swid: creds.SWID,
-          teamsCount: d.teams?.length,
-          teams: (d.teams || []).slice(0, 3).map(t => ({
-            id: t.id, name: t.name, location: t.location, nickname: t.nickname,
-            abbrev: t.abbrev, primaryOwner: t.primaryOwner, owners: t.owners,
-            members: t.members?.map(m => ({ id: m.id, displayName: m.displayName })),
-            keys: Object.keys(t),
-          })),
-          firstMatchup: (() => {
-            const m = (d.schedule || []).find(s => s.matchupPeriodId === 1);
-            if (!m) return null;
-            return {
-              homeTeamId: m.home?.teamId,
-              homeTotalPoints: m.home?.totalPoints,
-              homeTotalPointsLive: m.home?.totalPointsLive,
-              homeKeys: m.home ? Object.keys(m.home) : [],
-              awayTeamId: m.away?.teamId,
-              awayTotalPoints: m.away?.totalPoints,
-            };
-          })(),
-        };
-        res.json(out);
-      } catch { res.json({ error: 'parse failed', raw: body.slice(0, 500) }); }
-    });
-  }).on('error', (err) => res.json({ error: err.message }));
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -627,268 +610,6 @@ function fetchJSON(url, extraHeaders, _redirects) {
   });
 }
 
-/** GET /api/lineup?username=SLEEPER_USER&week=N
- *  Returns all rosters across ESPN, Sleeper, and Yahoo in one JSON payload.
- *  - username: your Sleeper username (required for Sleeper leagues)
- *  - week: scoring period (defaults to current NFL week)
- */
-app.get('/api/lineup', async (req, res) => {
-  try {
-    const sleeperUsername = req.query.username || req.query.user || 'cdownz25';
-    const weekOverride = req.query.week ? parseInt(req.query.week, 10) : null;
-
-    // Get current NFL state from Sleeper
-    const nflState = await fetchJSON('https://api.sleeper.app/v1/state/nfl').catch(() => null);
-    const season = nflState ? String(nflState.season) : String(new Date().getFullYear());
-    const week = weekOverride || nflState?.week || nflState?.display_week || 1;
-
-    const output = {
-      meta: { season, week, generated: new Date().toISOString() },
-      leagues: [],
-    };
-
-    // ── ESPN ──────────────────────────────────────────────────────
-    const creds = loadCredentials();
-    if (creds.espn_s2 && !creds.espn_s2.startsWith('YOUR_') && creds.espn_league_ids?.length) {
-      const espnResults = await Promise.allSettled(
-        creds.espn_league_ids.map(async (lid) => {
-          const year = parseInt(season, 10);
-          const url =
-            `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${year}` +
-            `/segments/0/leagues/${lid}` +
-            `?view=mMatchup&view=mRoster&view=mMatchupScore&view=mTeam&view=mSettings&view=mTransactions2&scoringPeriodId=${week}`;
-
-          return new Promise((resolve, reject) => {
-            https.get(url, {
-              headers: {
-                Cookie: `espn_s2=${creds.espn_s2}; SWID=${creds.SWID}`,
-                Accept: 'application/json',
-              },
-            }, (upstream) => {
-              let body = '';
-              upstream.on('data', (c) => (body += c));
-              upstream.on('end', () => {
-                try { resolve({ lid, data: JSON.parse(body) }); }
-                catch { reject(new Error('ESPN parse failed')); }
-              });
-            }).on('error', reject);
-          });
-        })
-      );
-
-      for (const result of espnResults) {
-        if (result.status !== 'fulfilled') continue;
-        const { lid, data } = result.value;
-        const leagueName = data.settings?.name || `ESPN ${lid}`;
-        const teams = data.teams || [];
-        const schedule = data.schedule || [];
-
-        // Find my team
-        const swid = creds.SWID;
-        let myTeamId = null;
-        const teamMap = {};
-        for (const t of teams) {
-          const name = t.name || [t.location, t.nickname].filter(Boolean).join(' ') || `Team ${t.id}`;
-          teamMap[t.id] = { name, roster: t.roster?.entries || [] };
-          if (swid && (t.primaryOwner === swid || t.owners?.includes(swid))) {
-            myTeamId = t.id;
-          }
-        }
-
-        // Find my matchup
-        const weekMatchups = schedule.filter(m => m.matchupPeriodId === week);
-        let myMatchup = null;
-        if (myTeamId != null) {
-          myMatchup = weekMatchups.find(m =>
-            m.home?.teamId === myTeamId || m.away?.teamId === myTeamId
-          );
-        }
-
-        // Parse my roster
-        const myRosterEntries = myTeamId ? (teamMap[myTeamId]?.roster || []) : [];
-        const starters = [];
-        const bench = [];
-
-        for (const entry of myRosterEntries) {
-          const slot = ESPN_SLOT[entry.lineupSlotId] || 'BN';
-          const player = entry.playerPoolEntry?.player || {};
-          const playerName = player.fullName || 'Unknown';
-          const pos = ESPN_POS[player.defaultPositionId] || '?';
-          const stats = player.stats || [];
-
-          let actual = 0, proj = 0;
-          for (const s of stats) {
-            if (s.scoringPeriodId === week && s.statSourceId === 0) actual = s.appliedTotal || 0;
-            if (s.scoringPeriodId === week && s.statSourceId === 1) proj = s.appliedTotal || 0;
-          }
-
-          const row = { player: playerName, pos, slot, actual: +actual.toFixed(2), proj: +proj.toFixed(2), platform: 'espn', espnId: entry.playerId };
-          if (slot === 'BN' || slot === 'IR') bench.push(row);
-          else starters.push(row);
-        }
-
-        // Opponent info
-        let oppName = 'BYE', oppScore = 0;
-        if (myMatchup) {
-          const oppSide = myMatchup.home?.teamId === myTeamId ? myMatchup.away : myMatchup.home;
-          if (oppSide) {
-            oppName = teamMap[oppSide.teamId]?.name || 'Opponent';
-            oppScore = +(oppSide.totalPointsLive ?? oppSide.totalPoints ?? 0).toFixed(2);
-          }
-          const mySide = myMatchup.home?.teamId === myTeamId ? myMatchup.home : myMatchup.away;
-          var myScore = +(mySide?.totalPointsLive ?? mySide?.totalPoints ?? 0).toFixed(2);
-        }
-
-        output.leagues.push({
-          platform: 'espn',
-          leagueId: lid,
-          name: leagueName,
-          myTeam: myTeamId ? (teamMap[myTeamId]?.name || 'My Team') : null,
-          opponent: oppName,
-          myScore: myScore ?? 0,
-          oppScore,
-          starters,
-          bench: bench.sort((a, b) => b.proj - a.proj),
-        });
-      }
-    }
-
-    // ── Sleeper ───────────────────────────────────────────────────
-    if (sleeperUsername) {
-      try {
-        const user = await fetchJSON(`https://api.sleeper.app/v1/user/${sleeperUsername}`);
-        if (user?.user_id) {
-          const userId = user.user_id;
-          const leagues = await fetchJSON(`https://api.sleeper.app/v1/user/${userId}/leagues/nfl/${season}`);
-
-          // Load players + projections from our cache endpoints
-          const [sleeperPlayers, projections] = await Promise.all([
-            fetchJSON(`http://localhost:${PORT}/proxy/sleeper/players`),
-            fetchJSON(`http://localhost:${PORT}/proxy/sleeper/projections/${season}/${week}`),
-          ]);
-
-          for (const league of (leagues || [])) {
-            const lid = league.league_id;
-            const [rosters, users, matchups, detail] = await Promise.all([
-              fetchJSON(`https://api.sleeper.app/v1/league/${lid}/rosters`),
-              fetchJSON(`https://api.sleeper.app/v1/league/${lid}/users`),
-              fetchJSON(`https://api.sleeper.app/v1/league/${lid}/matchups/${week}`),
-              fetchJSON(`https://api.sleeper.app/v1/league/${lid}`),
-            ]);
-
-            const scoring = detail.scoring_settings || {};
-            const rosterPositions = (detail.roster_positions || []).filter(p => p !== 'BN');
-            const nameMap = {};
-            (users || []).forEach(u => { nameMap[u.user_id] = u.display_name || u.username; });
-
-            const myRoster = (rosters || []).find(r =>
-              r.owner_id === userId || (r.co_owners && r.co_owners.includes(userId))
-            );
-            if (!myRoster) continue;
-
-            const myMatchup = (matchups || []).find(m => m.roster_id === myRoster.roster_id);
-            const oppMatchup = myMatchup
-              ? (matchups || []).find(m => m.matchup_id === myMatchup.matchup_id && m.roster_id !== myRoster.roster_id)
-              : null;
-            const oppRoster = oppMatchup ? (rosters || []).find(r => r.roster_id === oppMatchup.roster_id) : null;
-            const oppName = oppRoster ? (nameMap[oppRoster.owner_id] || 'Opponent') : 'BYE';
-
-            const starterIds = myMatchup?.starters || [];
-            const allPlayerIds = myMatchup?.players || [];
-            const benchIds = allPlayerIds.filter(pid => !starterIds.includes(pid));
-            const points = myMatchup?.players_points || {};
-
-            // Calculate projected points using Sleeper scoring
-            function calcProj(pid) {
-              const proj = projections?.[pid];
-              if (!proj) return 0;
-              let total = 0;
-              for (const [stat, val] of Object.entries(proj)) {
-                if (scoring[stat]) total += scoring[stat] * val;
-              }
-              return +total.toFixed(2);
-            }
-
-            const starters = starterIds.map((pid, i) => {
-              const p = sleeperPlayers?.[pid];
-              const playerName = p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : pid;
-              return {
-                player: playerName,
-                pos: p?.position || '?',
-                slot: rosterPositions[i] || 'FLEX',
-                actual: +(points[pid] ?? 0).toFixed(2),
-                proj: calcProj(pid),
-                platform: 'sleeper',
-                sleeperId: pid,
-              };
-            });
-
-            const benchPlayers = benchIds.map(pid => {
-              const p = sleeperPlayers?.[pid];
-              const playerName = p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : pid;
-              return {
-                player: playerName,
-                pos: p?.position || '?',
-                slot: 'BN',
-                actual: +(points[pid] ?? 0).toFixed(2),
-                proj: calcProj(pid),
-                platform: 'sleeper',
-                sleeperId: pid,
-              };
-            }).sort((a, b) => b.proj - a.proj);
-
-            const myPts = starterIds.reduce((sum, pid) => sum + (points[pid] || 0), 0);
-            const oppPts = oppMatchup
-              ? (oppMatchup.starters || []).reduce((sum, pid) => sum + ((oppMatchup.players_points || {})[pid] || 0), 0)
-              : 0;
-
-            output.leagues.push({
-              platform: 'sleeper',
-              leagueId: lid,
-              name: league.name || `Sleeper ${lid}`,
-              myTeam: nameMap[userId] || sleeperUsername,
-              opponent: oppName,
-              myScore: +myPts.toFixed(2),
-              oppScore: +oppPts.toFixed(2),
-              starters,
-              bench: benchPlayers,
-            });
-          }
-        }
-      } catch (err) {
-        output.leagues.push({ platform: 'sleeper', error: err.message });
-      }
-    }
-
-    // ── Yahoo (extension cache only) ────────────────────────────────
-    if (yahooExtCache.receivedAt && yahooExtCache.scoreboards) {
-      for (const [key, data] of Object.entries(yahooExtCache.scoreboards)) {
-        const leagueKey = key.split('_')[0];
-        output.leagues.push({
-          platform: 'yahoo',
-          leagueId: leagueKey,
-          name: 'Yahoo League',
-          note: 'Data from Chrome extension cache',
-        });
-      }
-    }
-
-    // ── Summary line for easy pasting ─────────────────────────────
-    output.summary = output.leagues
-      .filter(l => !l.error && l.starters)
-      .map(l => {
-        const total = l.starters.reduce((s, p) => s + p.actual, 0);
-        const projTotal = l.starters.reduce((s, p) => s + p.proj, 0);
-        return `${l.name} (${l.platform}): ${total.toFixed(1)} pts (proj ${projTotal.toFixed(1)}) vs ${l.opponent} (${l.oppScore})`;
-      })
-      .join(' | ');
-
-    res.json(output);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ═══════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // Fantasy News — Sleeper trending + ESPN player news
@@ -1224,8 +945,67 @@ function calcOptimalLineup(rosterData, rosterPositions) {
 }
 
 
+// ═══════════════════════════════════════════════════════════════════
+// Snapshot (from frontend autoSnapshotToServer)
+// ═══════════════════════════════════════════════════════════════════
+app.post('/api/snapshot', (req, res) => {
+  try {
+    const { season, week, leagues } = req.body || {};
+    if (!season || !week || !Array.isArray(leagues)) {
+      return res.status(400).json({ error: 'Missing season, week, or leagues' });
+    }
+    let saved = 0;
+    for (const l of leagues) {
+      if (!l.league_id || !l.platform) continue;
+      db.saveWeeklySnapshot(+season, +week, l.platform, l.league_id, l.league_name || '', {
+        myTeam: l.my_team || null,
+        oppTeam: l.opp_team || null,
+        myScore: l.my_score || 0,
+        oppScore: l.opp_score || 0,
+        myProj: l.my_projected || null,
+        oppProj: l.opp_projected || null,
+        result: l.result || null,
+      });
+      saved++;
+    }
+    res.json({ saved });
+  } catch (err) {
+    console.error('[Snapshot] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Trends API
+// ═══════════════════════════════════════════════════════════════════
+app.get('/api/trends', (req, res) => {
+  try {
+    const season = +(req.query.season || new Date().getFullYear());
+    const data = db.getTrendsData(season);
+    res.json(data);
+  } catch (err) {
+    console.error('[Trends] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/recap', (req, res) => {
+  try {
+    const { season, week, platform, league_id, league_name, recap } = req.body || {};
+    if (!season || !week || !platform || !league_id) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    db.saveWeeklyRecap(+season, +week, platform, league_id, league_name || '', recap || {});
+    res.json({ saved: true });
+  } catch (err) {
+    console.error('[Recap] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Start
 // ═══════════════════════════════════════════════════════════════════
+log('INFO', `Server starting on port ${PORT}`);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Fantasy dashboard running → http://0.0.0.0:${PORT}`);
 

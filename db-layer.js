@@ -110,6 +110,29 @@ CREATE TABLE IF NOT EXISTS yahoo_cache (
   received_at INTEGER NOT NULL,      -- Unix timestamp ms when data was received
   week INTEGER                       -- NFL week number (null for leagues)
 );
+
+-- weekly_recap: end-of-week awards and metrics per league
+-- Auto-populated when scores are final; one row per league per week
+CREATE TABLE IF NOT EXISTS weekly_recap (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  season INTEGER NOT NULL,
+  week INTEGER NOT NULL,
+  platform TEXT NOT NULL,
+  league_id TEXT NOT NULL,
+  league_name TEXT NOT NULL,
+  highest_scorer TEXT,         -- JSON: {player, points, pos}
+  boom_player TEXT,            -- JSON: {player, points, projected, pos} (biggest overperform)
+  bust_player TEXT,            -- JSON: {player, points, projected, pos} (biggest underperform)
+  blowout_margin REAL,         -- largest margin of victory across all matchups
+  closest_margin REAL,         -- smallest margin across all matchups
+  my_luck_score REAL,          -- my score vs median: positive = lucky win territory
+  actual_score REAL,           -- my actual total
+  optimal_score REAL,          -- my optimal total (coaching efficiency)
+  coaching_efficiency REAL,    -- actual/optimal * 100
+  recap_data TEXT,             -- JSON blob for additional recap details
+  captured_at INTEGER NOT NULL,
+  UNIQUE(season, week, platform, league_id)
+);
 `;
 
 // ---------------------------------------------------------------------------
@@ -817,6 +840,78 @@ function getYahooCacheTimestamp() {
   return row ? row.ts : null;
 }
 
+// ---------------------------------------------------------------------------
+// Weekly Recap
+// ---------------------------------------------------------------------------
+
+function saveWeeklyRecap(season, week, platform, leagueId, leagueName, recapData) {
+  if (!db) return;
+  const stmt = db.prepare(`
+    INSERT INTO weekly_recap (season, week, platform, league_id, league_name,
+      highest_scorer, boom_player, bust_player, blowout_margin, closest_margin,
+      my_luck_score, actual_score, optimal_score, coaching_efficiency, recap_data, captured_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(season, week, platform, league_id)
+    DO UPDATE SET league_name=excluded.league_name, highest_scorer=excluded.highest_scorer,
+      boom_player=excluded.boom_player, bust_player=excluded.bust_player,
+      blowout_margin=excluded.blowout_margin, closest_margin=excluded.closest_margin,
+      my_luck_score=excluded.my_luck_score, actual_score=excluded.actual_score,
+      optimal_score=excluded.optimal_score, coaching_efficiency=excluded.coaching_efficiency,
+      recap_data=excluded.recap_data, captured_at=excluded.captured_at
+  `);
+  stmt.run(
+    season, week, platform, leagueId, leagueName,
+    recapData.highestScorer ? JSON.stringify(recapData.highestScorer) : null,
+    recapData.boomPlayer ? JSON.stringify(recapData.boomPlayer) : null,
+    recapData.bustPlayer ? JSON.stringify(recapData.bustPlayer) : null,
+    recapData.blowoutMargin ?? null,
+    recapData.closestMargin ?? null,
+    recapData.myLuckScore ?? null,
+    recapData.actualScore ?? null,
+    recapData.optimalScore ?? null,
+    recapData.coachingEfficiency ?? null,
+    recapData.extra ? JSON.stringify(recapData.extra) : null,
+    Math.floor(Date.now() / 1000)
+  );
+}
+
+function getWeeklyRecaps(season, weekFrom, weekTo) {
+  if (!db) return [];
+  weekTo = weekTo || weekFrom || 18;
+  weekFrom = weekFrom || 1;
+  return db.prepare(
+    'SELECT * FROM weekly_recap WHERE season = ? AND week >= ? AND week <= ? ORDER BY week, platform, league_name'
+  ).all(season, weekFrom, weekTo);
+}
+
+function getTrendsData(season) {
+  if (!db) return { winRate: [], efficiency: [], recaps: [] };
+
+  // Win rate over time: all weekly snapshots for the season
+  const winRate = db.prepare(
+    'SELECT week, platform, league_id, league_name, my_score, opp_score, result FROM weekly_snapshots WHERE season = ? ORDER BY week'
+  ).all(season);
+
+  // Coaching efficiency: from roster_snapshots optimal_data
+  const effRows = db.prepare(
+    'SELECT week, platform, league_id, team_name, optimal_data FROM roster_snapshots WHERE season = ? AND optimal_data IS NOT NULL ORDER BY week'
+  ).all(season);
+  const efficiency = effRows.map(r => {
+    try {
+      const od = JSON.parse(r.optimal_data);
+      return { week: r.week, platform: r.platform, leagueId: r.league_id, teamName: r.team_name,
+               actualPts: od.actualPts, optimalPts: od.optimalPts, efficiency: od.efficiency };
+    } catch { return null; }
+  }).filter(Boolean);
+
+  // Weekly recaps
+  const recaps = db.prepare(
+    'SELECT * FROM weekly_recap WHERE season = ? ORDER BY week'
+  ).all(season);
+
+  return { winRate, efficiency, recaps };
+}
+
 module.exports = {
   // Lifecycle
   initDB,
@@ -852,6 +947,11 @@ module.exports = {
   saveYahooCacheBulk,
   loadYahooCache,
   getYahooCacheTimestamp,
+
+  // Weekly recap & trends
+  saveWeeklyRecap,
+  getWeeklyRecaps,
+  getTrendsData,
 
   // Express router (mount with app.use(db.routes))
   routes,
