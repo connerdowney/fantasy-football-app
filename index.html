@@ -6037,14 +6037,10 @@ async function fetchEspnFreeAgents(leagueId) {
           projPts = s.appliedTotal || 0;
         }
       }
-      // Fallback: if no projected stats found, check if there's any stat with appliedTotal
+      // Fallback: use Sleeper projection if ESPN has no weekly projection
       if (projPts <= 0) {
-        for (const s of (player.stats || [])) {
-          if (s.statSourceId === 1 && (s.appliedTotal || 0) > 0) {
-            projPts = s.appliedTotal;
-            break;
-          }
-        }
+        const sl = projLookup(name, pos);
+        if (sl) projPts = sl.projPts;
       }
 
       // Injury status from ESPN
@@ -7063,14 +7059,22 @@ async function getEspnTransactions(league) {
   const cacheKey = `espn-tx-${leagueId}`;
   if (txCache[cacheKey]) return txCache[cacheKey];
 
-  // Build player lookup from team rosters
-  const playerLookup = {};
+  // Build player lookup from ALL ESPN leagues + free agent caches
+  if (!window._espnPlayerCache) window._espnPlayerCache = {};
+  const playerLookup = window._espnPlayerCache;
   const teamNameLookup = {};
-  (league.raw?.teams || []).forEach(t => {
-    (t.roster?.entries || []).forEach(e => {
-      const p = e.playerPoolEntry?.player;
-      if (p) playerLookup[p.id] = p;
+  for (const l of STATE.espnLeagues) {
+    (l.raw?.teams || []).forEach(t => {
+      (t.roster?.entries || []).forEach(e => {
+        const p = e.playerPoolEntry?.player;
+        if (p) playerLookup[p.id] = p;
+      });
     });
+    // Also pull from free agent cache
+    const fac = wwEspnCache[l.leagueId || l.id];
+    if (fac) fac.forEach(a => { if (a.pid && a.name) playerLookup[a.pid] = { fullName: a.name, defaultPositionId: null, _pos: a.pos }; });
+  }
+  (league.raw?.teams || []).forEach(t => {
     const tid = t.id;
     const tname = t.name || (t.location && t.nickname ? `${t.location} ${t.nickname}`.trim() : null);
     if (tid != null && tname) teamNameLookup[tid] = tname;
@@ -7092,12 +7096,29 @@ async function getEspnTransactions(league) {
     }
 
     // Supplement playerLookup with player data embedded in transaction items
-    // (dropped players are no longer on rosters but ESPN includes them in tx data)
     for (const t of transactions) {
       for (const item of (t.items || [])) {
         const p = item.playerPoolEntry?.player || item.player;
         if (p && item.playerId && p.fullName) playerLookup[item.playerId] = p;
       }
+    }
+
+    // Resolve unknown player IDs via ESPN player lookup endpoint
+    const unknownIds = [];
+    for (const t of transactions.filter(t => t.status === 'EXECUTED' && t.type !== 'ROSTER')) {
+      for (const item of (t.items || [])) {
+        if (item.playerId && item.playerId > 0 && !playerLookup[item.playerId]) {
+          unknownIds.push(item.playerId);
+        }
+      }
+    }
+    if (unknownIds.length > 0) {
+      try {
+        const resolved = await fetchJSON(`/proxy/espn/${leagueId}/players?ids=${[...new Set(unknownIds)].join(',')}`);
+        for (const [id, info] of Object.entries(resolved)) {
+          playerLookup[id] = { fullName: info.name, defaultPositionId: info.pos };
+        }
+      } catch (e) { console.warn('[TX-ESPN] player lookup failed:', e.message); }
     }
 
     const parsed = transactions
@@ -7112,8 +7133,20 @@ async function getEspnTransactions(league) {
         const items = [];
         for (const item of (t.items || [])) {
           const player = item.playerPoolEntry?.player || item.player || playerLookup[item.playerId] || {};
-          const name = player.fullName || (item.playerId ? `Unknown (ID: ${item.playerId})` : '?');
-          const pos = ESPN_POS[player.defaultPositionId] || '?';
+          let name = player.fullName || player._name || '';
+          if (!name && item.playerId) {
+            // Fallback: search Sleeper player data by ESPN ID
+            if (STATE.players) {
+              for (const [, sp] of Object.entries(STATE.players)) {
+                if (sp.espn_id === item.playerId || sp.espn_id === String(item.playerId)) {
+                  name = sp.full_name || '';
+                  break;
+                }
+              }
+            }
+            if (!name) name = `Player #${item.playerId}`;
+          }
+          const pos = ESPN_POS[player.defaultPositionId] || player._pos || '?';
           const action = item.type === 'ADD' ? 'add' : 'drop';
           const teamId = item.teamId ?? item.fromTeamId ?? null;
           const teamName = teamId != null ? (teamNameLookup[teamId] || '') : '';
@@ -7227,11 +7260,19 @@ async function renderTransactions() {
   }
 
   if (!txns.length) {
-    container.innerHTML = `<div class="tx-empty">No transactions this week</div>`;
+    const msg = entry.platform === 'yahoo'
+      ? 'Yahoo transactions require OAuth (not available via extension)'
+      : 'No transactions this week';
+    container.innerHTML = `<div class="tx-empty">${msg}</div>`;
     return;
   }
 
-  const icons = { trade: '&#128260;', waiver: '&#128203;', add: '&#10133;', drop: '&#10134;' };
+  const icons = {
+    trade: '<span style="font-size:14px;color:var(--purple);">&#8644;</span>',
+    waiver: '<span style="font-size:14px;color:var(--green);">&#9733;</span>',
+    add: '<span style="font-size:16px;color:var(--blue);font-weight:700;">+</span>',
+    drop: '<span style="font-size:16px;color:var(--red);font-weight:700;">&minus;</span>'
+  };
   const labels = { trade: 'Trade', waiver: 'Waiver', add: 'Add', drop: 'Drop' };
 
   function timeAgo(ts) {
@@ -7456,8 +7497,8 @@ function updateCountdown() {
   const day = now.getDay(); // 0=Sun, 4=Thu, 1=Mon
   const hour = now.getHours();
   
-  // NFL game windows: Thu 8:15pm, Sun 1pm/4:25pm/8:20pm, Mon 8:15pm ET
-  // Determine next kickoff
+  // NFL game windows in ET (UTC-4 Sep-Nov DST, UTC-5 Nov-Feb)
+  // Use America/New_York to build correct kickoff times
   const gameWindows = [
     { day: 4, hour: 20, min: 15, label: 'TNF' },
     { day: 0, hour: 13, min: 0, label: 'Early Sunday' },
@@ -7466,17 +7507,30 @@ function updateCountdown() {
     { day: 1, hour: 20, min: 15, label: 'MNF' }
   ];
   
+  // Build a Date in ET by creating an ISO string with the ET offset
+  function kickoffET(baseDate, daysAhead, h, m) {
+    const d = new Date(baseDate);
+    d.setDate(d.getDate() + daysAhead);
+    // Use Intl to find current ET offset
+    const etStr = d.toLocaleString('en-US', { timeZone: 'America/New_York' });
+    const etDate = new Date(etStr);
+    const offsetMs = d.getTime() - etDate.getTime();
+    const target = new Date(d);
+    target.setHours(h, m, 0, 0);
+    // Shift from ET to local
+    target.setTime(target.getTime() + offsetMs);
+    return target;
+  }
+  
   let nextGame = null;
   let minMs = Infinity;
   
   for (const gw of gameWindows) {
-    const target = new Date(now);
     let daysAhead = (gw.day - day + 7) % 7;
-    if (daysAhead === 0 && (hour > gw.hour || (hour === gw.hour && now.getMinutes() >= gw.min))) {
-      daysAhead = 7; // already passed this week
+    let target = kickoffET(now, daysAhead, gw.hour, gw.min);
+    if (target <= now) {
+      target = kickoffET(now, daysAhead + 7, gw.hour, gw.min);
     }
-    target.setDate(target.getDate() + daysAhead);
-    target.setHours(gw.hour, gw.min, 0, 0);
     
     const ms = target - now;
     if (ms > 0 && ms < minMs) {

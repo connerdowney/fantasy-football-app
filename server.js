@@ -116,7 +116,7 @@ app.get('/proxy/espn/:leagueId/transactions', (req, res) => {
 
   const espnUrl =
     `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${year}` +
-    `/segments/0/leagues/${leagueId}?view=mTransactions2`;
+    `/segments/0/leagues/${leagueId}?view=mTransactions2&view=mRoster`;
 
   const options = {
     headers: {
@@ -133,6 +133,55 @@ app.get('/proxy/espn/:leagueId/transactions', (req, res) => {
     });
   }).on('error', (err) => {
     res.status(502).json({ error: 'ESPN transactions fetch failed', detail: err.message });
+  });
+});
+
+// ESPN player name lookup — resolve IDs to names for transaction display
+app.get('/proxy/espn/:leagueId/players', (req, res) => {
+  const creds = loadCredentials();
+  if (!creds.espn_s2 || creds.espn_s2.startsWith('YOUR_')) {
+    return res.status(400).json({ error: 'ESPN credentials not configured' });
+  }
+
+  const { leagueId } = req.params;
+  const ids = (req.query.ids || '').split(',').map(Number).filter(n => n > 0);
+  if (!ids.length) return res.json({});
+
+  const year = new Date().getFullYear();
+  const filter = JSON.stringify({
+    players: { filterIds: { value: ids }, limit: ids.length, sortPercOwned: { sortAsc: false, sortPriority: 1 } }
+  });
+
+  const espnUrl =
+    `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${year}` +
+    `/segments/0/leagues/${leagueId}?view=kona_player_info`;
+
+  const options = {
+    headers: {
+      Cookie: `espn_s2=${creds.espn_s2}; SWID=${creds.SWID}`,
+      Accept: 'application/json',
+      'x-fantasy-filter': filter,
+    },
+  };
+
+  https.get(espnUrl, options, (upstream) => {
+    let body = '';
+    upstream.on('data', (chunk) => (body += chunk));
+    upstream.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const result = {};
+        for (const entry of (data.players || [])) {
+          const p = entry.player || {};
+          if (p.id && p.fullName) result[p.id] = { name: p.fullName, pos: p.defaultPositionId };
+        }
+        res.json(result);
+      } catch {
+        res.status(502).json({ error: 'Failed to parse ESPN player data' });
+      }
+    });
+  }).on('error', (err) => {
+    res.status(502).json({ error: 'ESPN player lookup failed', detail: err.message });
   });
 });
 
