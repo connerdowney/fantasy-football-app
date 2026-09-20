@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  body {
+    width: 260px; padding: 14px 16px;
+    font-family: -apple-system, system-ui, sans-serif;
+    font-size: 13px; line-height: 1.5; margin: 0;
+    background: #1a1a2e; color: #e2e8f0;
+  }
+  h3 { margin: 0 0 10px; font-size: 14px; color: #fff; display: flex; align-items: center; gap: 6px; }
+  .status {
+    padding: 8px 10px; border-radius: 7px; margin-bottom: 10px;
+    font-size: 12px; font-weight: 600;
+  }
+  .ok   { background: rgba(16,185,129,.15); color: #6ee7b7; }
+  .err  { background: rgba(239,68,68,.15);  color: #fca5a5; }
+  .idle { background: rgba(107,114,128,.15); color: #9ca3af; }
+  .hint {
+    font-size: 11px; color: #6b7280; border-top: 1px solid rgba(255,255,255,.08);
+    padding-top: 8px; margin-top: 2px;
+  }
+</style>
+</head>
+<body>
+<h3>🏈 Yahoo Bridge</h3>
+<div id="status" class="status idle">Checking…</div>
+<div id="hint" class="hint"></div>
+<script src="popup.js"></script>
+</body>
+</html>

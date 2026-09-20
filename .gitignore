@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Database
+fantasy-data.db
+fantasy-data.db-wal
+fantasy-data.db-shm
+
+# Credentials (NEVER commit)
+credentials.json
+
+# Cache files
+.yahoo-ext-cache.json
+.fuse_hidden*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+nohup.out
+
+# Patch scripts (one-time use)
+patch_*.py
+
+# Old CSS rebuild file
+css-rebuild.css
+
+# SSL certs
+.certs/
+
+# SSL certs
+.certs/

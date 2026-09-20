@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "FF Dashboard – Yahoo Bridge",
+  "version": "1.0",
+  "description": "Bridges your Yahoo Fantasy session to the local FF dashboard. Navigate to any Yahoo Fantasy page to sync.",
+  "permissions": ["storage", "alarms", "scripting", "tabs"],
+  "host_permissions": [
+    "*://football.fantasysports.yahoo.com/*",
+    "*://pub-api-ro.fantasysports.yahoo.com/*",
+    "http://localhost:3001/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://football.fantasysports.yahoo.com/*"],
+      "js": ["relay.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://football.fantasysports.yahoo.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "FF Yahoo Bridge"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}
