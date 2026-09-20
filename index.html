@@ -584,13 +584,20 @@ header h1 {
 .top-performers-grid.tp-mode-ticker .tp-cards {
   display: flex !important;
   flex-wrap: nowrap !important;
-  overflow-x: auto !important;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
+  overflow-x: hidden !important;
   gap: 6px;
   padding-bottom: 2px;
+  animation: tpTickerScroll var(--tp-ticker-duration, 60s) linear infinite;
+  will-change: transform;
+}
+.top-performers-grid.tp-mode-ticker:hover .tp-cards {
+  animation-play-state: paused;
 }
 .top-performers-grid.tp-mode-ticker .tp-cards::-webkit-scrollbar { display: none; }
+@keyframes tpTickerScroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
 .top-performers-grid.tp-mode-ticker .tp-card {
   flex-direction: column;
   align-items: flex-start;
@@ -4538,7 +4545,37 @@ function renderTopPerformers() {
       </div>`;
     }
   }
+  // In ticker mode, duplicate cards for seamless scrolling loop
+  if (displayMode === 'ticker' && filtered.length >= 4) {
+    for (let i = 0; i < filtered.length; i++) {
+      const p = filtered[i];
+      const rank = i + 1;
+      const statusDot = p.status === 'mine' ? '<span class="tp-mine-dot" title="My player"></span>' : '';
+      const posClass = 'pos-' + p.pos;
+      const isTD = p.pts >= 12;
+      const teamStr = p.team ? `<span style="font-size:10px;color:var(--text-muted);font-weight:600;">${esc(p.team)}</span>` : '';
+      html += `<div class="tp-card${isTD ? ' tp-td' : ''}" aria-hidden="true">
+        <div class="tp-card-line1">
+          <span class="tp-rank">${rank}</span>
+          <span class="tp-pos ${posClass}">${p.pos}</span>
+          ${statusDot}<span class="tp-name">${esc(p.name)}</span>
+        </div>
+        <div class="tp-card-line2">
+          ${teamStr}
+          <span class="tp-pts">${p.pts.toFixed(1)}</span>
+          ${isTD ? '<span style="font-size:10px;color:var(--green);font-weight:700;">TD</span>' : ''}
+        </div>
+      </div>`;
+    }
+  }
   html += '</div>';
+
+  // Set scroll speed based on item count
+  if (displayMode === 'ticker' && filtered.length >= 4) {
+    const duration = Math.max(30, filtered.length * 5);
+    container.style.setProperty('--tp-ticker-duration', duration + 's');
+  }
+
   container.innerHTML = html;
 }
 
