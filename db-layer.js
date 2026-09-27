@@ -133,6 +133,26 @@ CREATE TABLE IF NOT EXISTS weekly_recap (
   captured_at INTEGER NOT NULL,
   UNIQUE(season, week, platform, league_id)
 );
+
+-- forecast_log: tracks projections and win probability over time during a matchup.
+-- Multiple rows per league per week, captured at different times to show trends.
+CREATE TABLE IF NOT EXISTS forecast_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  season INTEGER NOT NULL,
+  week INTEGER NOT NULL,
+  platform TEXT NOT NULL,
+  league_id TEXT NOT NULL,
+  league_name TEXT NOT NULL,
+  my_score REAL DEFAULT 0,
+  opp_score REAL DEFAULT 0,
+  my_proj REAL,
+  opp_proj REAL,
+  my_win_prob REAL,
+  is_pregame INTEGER DEFAULT 0,       -- 1 = captured before games start
+  captured_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_forecast_log_lookup
+  ON forecast_log(season, week, platform, league_id);
 `;
 
 // ---------------------------------------------------------------------------
@@ -516,6 +536,37 @@ function dismissAlert(alertId) {
 }
 
 // ---------------------------------------------------------------------------
+// Forecast Logging
+// ---------------------------------------------------------------------------
+
+function logForecasts(matchups) {
+  const season = new Date().getFullYear();
+  const capturedAt = now();
+  const stmt = db.prepare(`
+    INSERT INTO forecast_log (season, week, platform, league_id, league_name,
+      my_score, opp_score, my_proj, opp_proj, my_win_prob, is_pregame, captured_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const insert = db.transaction((items) => {
+    let count = 0;
+    for (const m of items) {
+      const isPregame = (m.myScore === 0 && m.oppScore === 0) ? 1 : 0;
+      // Throttle: skip if we logged this league within the last 5 minutes
+      const recent = db.prepare(
+        'SELECT captured_at FROM forecast_log WHERE season = ? AND week = ? AND platform = ? AND league_id = ? ORDER BY captured_at DESC LIMIT 1'
+      ).get(season, m.week, m.platform, m.leagueId);
+      if (recent && (capturedAt - recent.captured_at) < 300) continue;
+      stmt.run(season, m.week, m.platform, m.leagueId, m.leagueName,
+        m.myScore ?? 0, m.oppScore ?? 0, m.myProj ?? null, m.oppProj ?? null,
+        m.myWinProb ?? null, isPregame, capturedAt);
+      count++;
+    }
+    return count;
+  });
+  return insert(matchups);
+}
+
+// ---------------------------------------------------------------------------
 // Week Selector Support
 // ---------------------------------------------------------------------------
 
@@ -711,6 +762,37 @@ routes.post('/api/alerts/:alertId/dismiss', (req, res) => {
     } else {
       res.json({ success: true, alertId });
     }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/forecast — log current projections and win probability for trend tracking
+routes.post('/api/forecast', (req, res) => {
+  try {
+    const { matchups } = req.body;
+    if (!matchups || !Array.isArray(matchups)) {
+      return res.status(400).json({ error: 'matchups array required' });
+    }
+    const saved = logForecasts(matchups);
+    res.json({ success: true, saved });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/forecast/:season/:week — get forecast history for a week
+routes.get('/api/forecast/:season/:week', (req, res) => {
+  try {
+    const { season, week } = req.params;
+    const leagueId = req.query.league_id;
+    let rows;
+    if (leagueId) {
+      rows = db.prepare('SELECT * FROM forecast_log WHERE season = ? AND week = ? AND league_id = ? ORDER BY captured_at ASC').all(parseInt(season), parseInt(week), leagueId);
+    } else {
+      rows = db.prepare('SELECT * FROM forecast_log WHERE season = ? AND week = ? ORDER BY captured_at ASC').all(parseInt(season), parseInt(week));
+    }
+    res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -941,6 +1023,9 @@ module.exports = {
   saveDecisionAlert,
   getActiveAlerts,
   dismissAlert,
+
+  // Forecast logging
+  logForecasts,
 
   // Yahoo cache
   saveYahooCache,

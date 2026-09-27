@@ -2410,6 +2410,9 @@ header h1 {
 .toast.td { border-left: 3px solid var(--green); }
 .toast.milestone { border-left: 3px solid var(--accent); }
 .toast.lead { border-left: 3px solid var(--green); }
+.toast.score { border-left: 3px solid var(--blue); }
+@keyframes playerFlash { 0%,100% { background: transparent; } 25%,75% { background: rgba(34,197,94,0.15); } }
+.player-row.flash { animation: playerFlash 2s ease; }
 @keyframes toastIn {
   from { transform: translateX(100%); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
@@ -3601,6 +3604,7 @@ async function handleLoad() {
 
     // Auto-snapshot: save this week's data to SQLite for historical tracking
     autoSnapshotToServer();
+    logForecastToServer();
 
     scheduleNextRefresh();
   } catch (err) {
@@ -3810,6 +3814,10 @@ function parseESPNLeague(data) {
       oppScore: myAway ? (myAway.totalPointsLive ?? myAway.totalPoints ?? 0) : 0,
       myProj: myHome.totalProjectedPointsLive ?? myHome.totalProjectedPoints ?? null,
       oppProj: myAway ? (myAway.totalProjectedPointsLive ?? myAway.totalProjectedPoints ?? null) : null,
+      myWinProb: myHome.winProbability ?? null,
+      oppWinProb: myAway?.winProbability ?? null,
+      myProjPreGame: myHome.totalProjectedPoints ?? null,
+      oppProjPreGame: myAway?.totalProjectedPoints ?? null,
       myRoster: myTeam?.roster || [],
       oppRoster: oppTeam?.roster || [],
     });
@@ -4368,7 +4376,7 @@ function renderScoreboardStrip() {
   // ESPN
   for (const lg of STATE.espnLeagues) {
     for (const m of (lg.matchups || [])) {
-      matchups.push({ league: m.name, platform: 'espn', myName: m.myName, oppName: m.oppName, myScore: m.myScore, oppScore: m.oppScore, myProj: m.myProj ?? null, oppProj: m.oppProj ?? null });
+      matchups.push({ league: m.name, platform: 'espn', myName: m.myName, oppName: m.oppName, myScore: m.myScore, oppScore: m.oppScore, myProj: m.myProj ?? null, oppProj: m.oppProj ?? null, myWinProb: m.myWinProb ?? null });
     }
   }
 
@@ -4381,9 +4389,10 @@ function renderScoreboardStrip() {
   if (matchups.length === 0) { strip.innerHTML = ''; return; }
 
   strip.innerHTML = matchups.map(m => {
-    // Use same win-probability logic as scoreCard: projections first, scores as fallback
     let pct = 50;
-    if (m.myProj != null && m.oppProj != null && (m.myProj + m.oppProj) > 0) {
+    if (m.myWinProb != null) {
+      pct = Math.round(m.myWinProb * 100);
+    } else if (m.myProj != null && m.oppProj != null && (m.myProj + m.oppProj) > 0) {
       pct = Math.round((m.myProj / (m.myProj + m.oppProj)) * 100);
     } else {
       const total = m.myScore + m.oppScore;
@@ -4955,6 +4964,7 @@ function renderESPNCard(matchup, isExpanded) {
     oppName: matchup.oppName,
     myScore, oppScore,
     myProj: matchup.myProj, oppProj: matchup.oppProj,
+    myWinProb: matchup.myWinProb,
     isExpanded, detail,
   });
 }
@@ -5000,6 +5010,8 @@ function renderESPNSide(rosterEntries, name, isMine) {
     }
   }
 
+  const SLOT_ORDER = {QB:0,WR:1,RB:2,FLEX:3,TE:4,DEF:5,K:6};
+  starters.sort((a, b) => (SLOT_ORDER[a.slot] ?? 99) - (SLOT_ORDER[b.slot] ?? 99));
   bench.sort((a, b) => b.proj - a.proj);
 
   // Swap candidates — flag bench players projected higher than a compatible starter
@@ -5102,11 +5114,14 @@ async function loadYahooRoster(teamKey, retries = 2) {
         continue;
       }
 
-      const starters = players.filter(p => p.slot !== 'BN' && p.slot !== 'IR');
+      const SLOT_ORD = {QB:0,WR:1,RB:2,FLEX:3,W_R_T:3,TE:4,DEF:5,K:6};
+      const starters = players.filter(p => p.slot !== 'BN' && p.slot !== 'IR')
+        .sort((a, b) => (SLOT_ORD[a.slot] ?? 99) - (SLOT_ORD[b.slot] ?? 99));
       const bench = players.filter(p => p.slot === 'BN' || p.slot === 'IR')
         .sort((a, b) => b.proj - a.proj);
 
       const tableHtml = buildPlayerRows(starters, bench, new Set());
+      el.className = '';
       el.innerHTML = tableHtml;
       return;
     } catch (err) {
@@ -5227,23 +5242,25 @@ function matchupInsight(myScore, oppScore, myProj, oppProj, myName) {
   return parts.join(' \u2014 ');
 }
 
-function scoreCard({ id, name, platform, myName, oppName, myScore, oppScore, myProj, oppProj, isExpanded, detail, leagueId, platformMeta }) {
+function scoreCard({ id, name, platform, myName, oppName, myScore, oppScore, myProj, oppProj, myWinProb, isExpanded, detail, leagueId, platformMeta }) {
   const myClass = myScore > oppScore ? 'score-win' : myScore < oppScore ? 'score-lose' : 'score-tie';
   const oppClass = oppScore > myScore ? 'score-win' : oppScore < myScore ? 'score-lose' : 'score-tie';
 
   const myProjHtml = myProj != null ? `<div class="team-projected">Proj: ${myProj.toFixed(1)}</div>` : '';
   const oppProjHtml = oppProj != null ? `<div class="team-projected">Proj: ${oppProj.toFixed(1)}</div>` : '';
 
-  // Win probability bar from projected totals
+  // Win probability: prefer platform-native value, fall back to projection ratio
   let winProbHtml = '';
   let myPct = 50;
-  if (myProj != null && oppProj != null && (myProj + oppProj) > 0) {
+  if (myWinProb != null) {
+    myPct = Math.round(myWinProb * 100);
+  } else if (myProj != null && oppProj != null && (myProj + oppProj) > 0) {
     myPct = Math.round((myProj / (myProj + oppProj)) * 100);
   } else if ((myScore + oppScore) > 0) {
     myPct = Math.round((myScore / (myScore + oppScore)) * 100);
   }
 
-  const hasData = (myScore + oppScore > 0) || (myProj != null && oppProj != null);
+  const hasData = (myScore + oppScore > 0) || (myProj != null && oppProj != null) || myWinProb != null;
   if (hasData) {
     winProbHtml = `<div class="win-prob-bar"><div class="win-prob-fill" style="width:${myPct}%"></div></div>
       <div class="win-prob-label">${myPct}% win</div>`;
@@ -7861,8 +7878,14 @@ function playTone(freq, duration, type = 'sine', volume = 0.3) {
 function toggleAudio() {
   _audioEnabled = !_audioEnabled;
   try { localStorage.setItem('ff_audio_alerts', _audioEnabled); } catch {}
+  // Create AudioContext on user gesture if needed
+  const ctx = getAudioCtx();
+  if (ctx.state === 'suspended') ctx.resume();
   updateAudioToggle();
-  if (_audioEnabled) playScoreAlert(); // confirmation chime
+  if (_audioEnabled) {
+    playTDAlert();
+    showToast('&#128264; Audio alerts ON — you should hear a test sound', 'score');
+  }
 }
 
 function updateAudioToggle() {
@@ -7874,31 +7897,31 @@ function updateAudioToggle() {
 
 function playScoreAlert() {
   // Short rising chime
-  playTone(523, 0.15, 'sine', 0.2);
-  setTimeout(() => playTone(659, 0.15, 'sine', 0.2), 100);
+  playTone(523, 0.15, 'sine', 0.5);
+  setTimeout(() => playTone(659, 0.15, 'sine', 0.5), 100);
 }
 
 function playTDAlert() {
   // Triumphant fanfare — ascending notes
-  playTone(523, 0.2, 'square', 0.15);
-  setTimeout(() => playTone(659, 0.2, 'square', 0.15), 150);
-  setTimeout(() => playTone(784, 0.3, 'square', 0.15), 300);
-  setTimeout(() => playTone(1047, 0.4, 'square', 0.2), 500);
+  playTone(523, 0.2, 'square', 0.4);
+  setTimeout(() => playTone(659, 0.2, 'square', 0.4), 150);
+  setTimeout(() => playTone(784, 0.3, 'square', 0.4), 300);
+  setTimeout(() => playTone(1047, 0.4, 'square', 0.5), 500);
 }
 
 function playLeadChangeAlert() {
   // Victory horn — bold descending-then-ascending
-  playTone(784, 0.15, 'sawtooth', 0.1);
-  setTimeout(() => playTone(659, 0.15, 'sawtooth', 0.1), 120);
-  setTimeout(() => playTone(784, 0.2, 'sawtooth', 0.12), 240);
-  setTimeout(() => playTone(1047, 0.5, 'sawtooth', 0.15), 400);
+  playTone(784, 0.15, 'sawtooth', 0.3);
+  setTimeout(() => playTone(659, 0.15, 'sawtooth', 0.3), 120);
+  setTimeout(() => playTone(784, 0.2, 'sawtooth', 0.35), 240);
+  setTimeout(() => playTone(1047, 0.5, 'sawtooth', 0.4), 400);
 }
 
 function playLeadLostAlert() {
   // Descending minor tone
-  playTone(440, 0.2, 'sine', 0.15);
-  setTimeout(() => playTone(349, 0.2, 'sine', 0.15), 150);
-  setTimeout(() => playTone(294, 0.4, 'sine', 0.12), 300);
+  playTone(440, 0.2, 'sine', 0.4);
+  setTimeout(() => playTone(349, 0.2, 'sine', 0.35), 150);
+  setTimeout(() => playTone(294, 0.4, 'sine', 0.3), 300);
 }
 
 // -- Toast notification system --
@@ -7911,6 +7934,20 @@ function showToast(message, type = 'td') {
   container.appendChild(toast);
   // CSS animation handles fade-out at 4s, remove after 4.5s
   setTimeout(() => { toast.remove(); }, 4500);
+}
+
+function flashPlayerRow(playerName) {
+  for (const row of document.querySelectorAll('.player-row .player-name')) {
+    if (row.textContent.includes(playerName)) {
+      const el = row.closest('.player-row');
+      el.classList.remove('flash');
+      void el.offsetWidth;
+      el.classList.add('flash');
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      setTimeout(() => el.classList.remove('flash'), 2100);
+      break;
+    }
+  }
 }
 
 // Previous scores for delta tracking
@@ -7931,12 +7968,17 @@ function detectScoreChanges(currentTopPerformers) {
     const diff = p.pts - prev;
     if (diff >= 6 && p.status === 'mine') {
       showToast('&#127944; ' + p.name + ' TD! +' + diff.toFixed(1) + ' pts', 'td');
+      flashPlayerRow(p.name);
       playTDAlert();
     } else if (p.pts >= 20 && prev < 20 && p.status === 'mine') {
       showToast('&#11088; ' + p.name + ' hit 20+ pts!', 'milestone');
+      flashPlayerRow(p.name);
+      playScoreAlert();
+    } else if (diff > 0 && p.status === 'mine') {
+      showToast('&#128200; ' + p.name + ' +' + diff.toFixed(1) + ' pts (' + p.pts.toFixed(1) + ' total)', 'score');
+      flashPlayerRow(p.name);
       playScoreAlert();
     }
-    if (diff > 0 && diff < 6 && p.status === 'mine') playScoreAlert();
     deltas.push({ name: p.name, delta: diff });
     _prevPlayerScores[p.name] = p.pts;
   }
@@ -8577,6 +8619,46 @@ function autoSnapshotToServer() {
     });
   } catch (err) {
     console.warn('[Snapshot] Error building payload:', err.message);
+  }
+}
+
+function logForecastToServer() {
+  try {
+    const matchups = [];
+
+    for (const league of (STATE.sleeperLeagues || [])) {
+      if (league.error || !league.myMatchup) continue;
+      const my = league.myMatchup;
+      const opp = league._allMatchups?.find(m => m.matchup_id === my.matchup_id && m.roster_id !== my.roster_id);
+      const myScore = (my.starters || []).reduce((s, pid) => s + ((my.players_points || {})[pid] || 0), 0);
+      const oppScore = opp ? (opp.starters || []).reduce((s, pid) => s + ((opp.players_points || {})[pid] || 0), 0) : 0;
+      const myProj = calcTeamProjected(my, league.scoring);
+      const oppProj = opp ? calcTeamProjected(opp, league.scoring) : 0;
+      matchups.push({ week: STATE.week, platform: 'sleeper', leagueId: league.league_id, leagueName: league.name, myScore, oppScore, myProj, oppProj, myWinProb: null });
+    }
+
+    for (const league of (STATE.espnLeagues || [])) {
+      for (const m of (league.matchups || [])) {
+        matchups.push({ week: STATE.week, platform: 'espn', leagueId: m.id, leagueName: m.name, myScore: m.myScore, oppScore: m.oppScore, myProj: m.myProj, oppProj: m.oppProj, myWinProb: m.myWinProb ?? null });
+      }
+    }
+
+    for (const league of (STATE.yahooLeagues || [])) {
+      if (league.error) continue;
+      matchups.push({ week: STATE.week, platform: 'yahoo', leagueId: league.league_id || league.league_key, leagueName: league.name, myScore: league.myScore || 0, oppScore: league.oppScore || 0, myProj: league.myProjTotal ?? null, oppProj: league.oppProjTotal ?? null, myWinProb: null });
+    }
+
+    if (matchups.length === 0) return;
+
+    fetch('/api/forecast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ matchups }),
+    }).then(r => r.json()).then(res => {
+      if (res.saved) console.log('[Forecast] Logged', res.saved, 'matchups');
+    }).catch(err => console.warn('[Forecast]', err.message));
+  } catch (err) {
+    console.warn('[Forecast] Error:', err.message);
   }
 }
 
