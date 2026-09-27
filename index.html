@@ -3368,6 +3368,7 @@ const STATE = {
   espnLeagues: [],
   espnSWID: null,
   yahooLeagues: [],
+  pregameForecasts: {},
   activeTab: 'all',
   layout: 'columns',
   refreshTimer: null,
@@ -3605,6 +3606,7 @@ async function handleLoad() {
     // Auto-snapshot: save this week's data to SQLite for historical tracking
     autoSnapshotToServer();
     logForecastToServer();
+    loadPregameForecasts();
 
     scheduleNextRefresh();
   } catch (err) {
@@ -4870,6 +4872,7 @@ function renderSleeperCard(league, isExpanded) {
 
   const detail = isExpanded ? renderSleeperDetail(league) : '';
 
+  const pgS = STATE.pregameForecasts[league.league_id] || {};
   return scoreCard({
     id: league.league_id,
     name: league.name,
@@ -4878,6 +4881,8 @@ function renderSleeperCard(league, isExpanded) {
     myName: league.myName,
     oppName: league.oppName,
     myScore, oppScore, myProj, oppProj,
+    pregameMyProj: pgS.my_proj || null,
+    pregameOppProj: pgS.opp_proj || null,
     isExpanded, detail,
   });
 }
@@ -4955,6 +4960,7 @@ function renderESPNCard(matchup, isExpanded) {
 
   const detail = isExpanded ? renderESPNDetail(matchup) : '';
 
+  const pgE = STATE.pregameForecasts[matchup.leagueId || matchup.id] || {};
   return scoreCard({
     id: matchup.id,
     name: matchup.name,
@@ -4965,6 +4971,8 @@ function renderESPNCard(matchup, isExpanded) {
     myScore, oppScore,
     myProj: matchup.myProj, oppProj: matchup.oppProj,
     myWinProb: matchup.myWinProb,
+    pregameMyProj: pgE.my_proj || null,
+    pregameOppProj: pgE.opp_proj || null,
     isExpanded, detail,
   });
 }
@@ -5056,6 +5064,7 @@ function renderYahooCard(league, isExpanded) {
 
   const detail = isExpanded ? renderYahooDetail(league) : '';
 
+  const pg = STATE.pregameForecasts[league.league_id] || STATE.pregameForecasts['yahoo-' + league.leagueKey] || {};
   return scoreCard({
     id: league.league_id,
     name: league.name,
@@ -5068,6 +5077,8 @@ function renderYahooCard(league, isExpanded) {
     oppScore: league.oppScore,
     myProj: league.myProjTotal || null,
     oppProj: league.oppProjTotal || null,
+    pregameMyProj: pg.my_proj || null,
+    pregameOppProj: pg.opp_proj || null,
     isExpanded, detail,
   });
 }
@@ -5242,12 +5253,18 @@ function matchupInsight(myScore, oppScore, myProj, oppProj, myName) {
   return parts.join(' \u2014 ');
 }
 
-function scoreCard({ id, name, platform, myName, oppName, myScore, oppScore, myProj, oppProj, myWinProb, isExpanded, detail, leagueId, platformMeta }) {
+function scoreCard({ id, name, platform, myName, oppName, myScore, oppScore, myProj, oppProj, myWinProb, isExpanded, detail, leagueId, platformMeta, pregameMyProj, pregameOppProj }) {
   const myClass = myScore > oppScore ? 'score-win' : myScore < oppScore ? 'score-lose' : 'score-tie';
   const oppClass = oppScore > myScore ? 'score-win' : oppScore < myScore ? 'score-lose' : 'score-tie';
 
-  const myProjHtml = myProj != null ? `<div class="team-projected">Proj: ${myProj.toFixed(1)}</div>` : '';
-  const oppProjHtml = oppProj != null ? `<div class="team-projected">Proj: ${oppProj.toFixed(1)}</div>` : '';
+  let myProjHtml = myProj != null ? `<div class="team-projected">Proj: ${myProj.toFixed(1)}</div>` : '';
+  let oppProjHtml = oppProj != null ? `<div class="team-projected">Proj: ${oppProj.toFixed(1)}</div>` : '';
+  if (pregameMyProj != null && myProj != null && Math.abs(pregameMyProj - myProj) > 0.5) {
+    myProjHtml += `<div class="team-projected" style="font-size:9px;color:var(--text-muted);">Pre: ${pregameMyProj.toFixed(1)}</div>`;
+  }
+  if (pregameOppProj != null && oppProj != null && Math.abs(pregameOppProj - oppProj) > 0.5) {
+    oppProjHtml += `<div class="team-projected" style="font-size:9px;color:var(--text-muted);">Pre: ${pregameOppProj.toFixed(1)}</div>`;
+  }
 
   // Win probability: prefer platform-native value, fall back to projection ratio
   let winProbHtml = '';
@@ -5273,11 +5290,19 @@ function scoreCard({ id, name, platform, myName, oppName, myScore, oppScore, myP
   const hiddenClass = isHidden ? ' hidden-league' : '';
   const hideBtn = `<button class="league-hide-btn" onclick="event.stopPropagation(); toggleLeagueHidden('${hideId}');">${isHidden ? 'Show' : 'Hide'}</button>`;
 
-  // Leading/trailing/tied banner — always shown, Tied when both 0 (pre-game)
+  // Leading/trailing/tied banner + projected winner
   let statusBanner = '';
   if (myScore > oppScore) statusBanner = '<div class="matchup-status-banner leading">Leading</div>';
   else if (myScore < oppScore) statusBanner = '<div class="matchup-status-banner trailing">Trailing</div>';
   else statusBanner = '<div class="matchup-status-banner tied">Tied</div>';
+  if (myProj != null && oppProj != null && (myProj + oppProj) > 0) {
+    const projWinner = myProj > oppProj;
+    const projLabel = projWinner ? 'Proj Win' : 'Proj Loss';
+    const projStyle = projWinner
+      ? 'background:rgba(34,197,94,0.12);color:var(--green);border:1px solid rgba(34,197,94,0.3);'
+      : 'background:rgba(239,68,68,0.12);color:var(--red);border:1px solid rgba(239,68,68,0.3);';
+    statusBanner += '<div class="matchup-status-banner" style="' + projStyle + 'margin-left:4px;">' + projLabel + '</div>';
+  }
 
   return `<div class="league-card ${isExpanded ? 'expanded' : ''}${bbClass}${hiddenClass}" data-id="${id}">
     ${statusBanner}
@@ -8143,6 +8168,22 @@ async function loadTrendsData() {
       }
     }
     const data = { leagues: Object.values(leagueMap), recaps: raw.recaps || [] };
+
+    // Attach forecast accuracy per league from coaching scores
+    const maxWk = Math.max(...Object.values(leagueMap).flatMap(l => l.weeks.map(w => w.week)), 0);
+    const csPromises = [];
+    for (let w = 1; w <= maxWk; w++) csPromises.push(fetchJSON(`/api/coaching-score/${season}/${w}`).catch(() => null));
+    const csResults = await Promise.all(csPromises);
+    for (const cr of csResults) {
+      if (!cr || !cr.scores) continue;
+      for (const s of cr.scores) {
+        const key = `${s.platform}::${s.league_id}`;
+        if (leagueMap[key]) {
+          if (!leagueMap[key].forecastByWeek) leagueMap[key].forecastByWeek = {};
+          leagueMap[key].forecastByWeek[cr.week] = s;
+        }
+      }
+    }
     if (!data.leagues.length) {
       container.innerHTML = `<div style="text-align:center;padding:60px 20px;color:var(--text-muted);">
         <p style="font-size:15px;font-weight:500;">No trend data yet</p>
@@ -8251,7 +8292,16 @@ function renderTrends(data) {
       if (effs.length > 0) {
         const avg = effs.reduce((s, e) => s + e.eff, 0) / effs.length;
         const color = avg >= 95 ? 'var(--green)' : avg >= 85 ? 'var(--amber)' : 'var(--red)';
-        effStr = '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Coaching: <span style="color:' + color + ';font-weight:600;">' + avg.toFixed(0) + '%</span></div>';
+        effStr = '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Lineup Eff: <span style="color:' + color + ';font-weight:600;">' + avg.toFixed(0) + '%</span></div>';
+      }
+    }
+    if (league.forecastByWeek) {
+      const fws = Object.values(league.forecastByWeek).filter(f => f.pregame_correct !== null);
+      if (fws.length > 0) {
+        const correct = fws.filter(f => f.pregame_correct).length;
+        const pct = Math.round((correct / fws.length) * 100);
+        const fcColor = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--amber)' : 'var(--red)';
+        effStr += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Forecast: <span style="color:' + fcColor + ';font-weight:600;">' + correct + '/' + fws.length + ' (' + pct + '%)</span></div>';
       }
     }
     html += '<div class="stat-tile" style="text-align:left;padding:12px 16px;">'
@@ -8701,6 +8751,17 @@ function autoSnapshotToServer() {
   } catch (err) {
     console.warn('[Snapshot] Error building payload:', err.message);
   }
+}
+
+async function loadPregameForecasts() {
+  try {
+    const data = await fetchJSON(`/api/coaching-score/2026/${STATE.week}`);
+    if (data && data.scores) {
+      for (const s of data.scores) {
+        STATE.pregameForecasts[s.league_id] = s.pregame;
+      }
+    }
+  } catch (e) { /* silent */ }
 }
 
 function logForecastToServer() {
