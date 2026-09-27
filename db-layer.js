@@ -899,6 +899,18 @@ routes.post('/api/snapshot', (req, res) => {
   }
 });
 
+routes.get('/api/snapshots/:leagueId/:season/:week', (req, res) => {
+  const { leagueId, season, week } = req.params;
+  try {
+    const rows = db.prepare(
+      'SELECT league_id, league_name, platform, my_team, opp_team, my_score, opp_score, my_proj, opp_proj, result FROM weekly_snapshots WHERE league_id = ? AND season = ? AND week = ?'
+    ).all(leagueId, parseInt(season), parseInt(week));
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------

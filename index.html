@@ -2397,8 +2397,7 @@ header h1 {
   box-shadow: 0 4px 20px rgba(0,0,0,0.3);
   font-size: 13px;
   max-width: 320px;
-  animation: toastIn 0.4s ease-out, toastOut 0.3s ease-in forwards;
-  animation-delay: 0s, 4s;
+  animation: toastIn 0.4s ease-out;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3248,6 +3247,7 @@ header h1 {
   <div class="recap-header" onclick="toggleRecap()">
     <span class="section-drag-handle" onclick="event.stopPropagation()" title="Drag to reorder">&#8942;</span>
     <span class="recap-title" id="recap-title-text">Weekly Recap</span>
+    <select id="recap-week-select" onclick="event.stopPropagation()" onchange="switchRecapWeek(this.value)" style="margin-left:8px;background:var(--card);color:var(--text);border:1px solid var(--card-border);border-radius:6px;padding:2px 6px;font-size:12px;cursor:pointer;"></select>
     <span class="recap-chevron" id="recap-chevron">&#9650;</span>
   </div>
   <div class="recap-body" id="recap-body">
@@ -3373,6 +3373,8 @@ const STATE = {
   layout: 'columns',
   refreshTimer: null,
   recapWeek: 0, // the week shown in recap (may be week-1 if current week has no scores)
+  recapViewWeek: 0, // user-selected recap week (0 = auto)
+  recapWeekCache: {}, // cached matchup data by week: { [week]: { sleeper: {}, espn: {} } }
   optimalWeek: 0,
   hiddenLeagues: JSON.parse(localStorage.getItem('ff_hidden_leagues') || '[]'),
   mainView: 'home',    // active main nav: home | scores | widgets | news
@@ -3691,14 +3693,18 @@ async function fetchPrevWeekRecapData() {
   const prevWeek = STATE.week - 1;
   if (prevWeek < 1) return;
 
+  const cacheEntry = { sleeper: {}, espn: {} };
+
   // Sleeper: fetch last week's matchups for each league
   for (const league of STATE.sleeperLeagues) {
     if (league.error) continue;
     try {
       const matchups = await fetchJSON(`${SLEEPER_API}/league/${league.league_id}/matchups/${prevWeek}`);
       league._recapMatchups = matchups || [];
+      cacheEntry.sleeper[league.league_id] = matchups || [];
     } catch {
       league._recapMatchups = [];
+      cacheEntry.sleeper[league.league_id] = [];
     }
   }
 
@@ -3708,10 +3714,14 @@ async function fetchPrevWeekRecapData() {
     try {
       const data = await fetchJSON(`/proxy/espn/${league.leagueId}/${prevWeek}`);
       league._recapRaw = data;
+      cacheEntry.espn[league.leagueId] = data;
     } catch {
       league._recapRaw = null;
+      cacheEntry.espn[league.leagueId] = null;
     }
   }
+
+  STATE.recapWeekCache[prevWeek] = cacheEntry;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -4285,7 +4295,7 @@ function renderAll() {
   if (raSection.classList.contains('open')) renderRosterAlerts();
 
   // v1.1: Matchup of the Week + Quick Stats
-  renderMatchupOfTheWeek();
+  // renderMatchupOfTheWeek(); // removed: inaccurate during live games (uses score not projection)
   // v1.1: Injury alert strip + last updated + status
   renderInjuryAlertStrip();
   updateLastUpdated();
@@ -4498,7 +4508,7 @@ function renderTopPerformers() {
   if (all.length === 0) { container.innerHTML = ''; return; }
 
   all.sort((a, b) => b.pts - a.pts);
-  const top = all.slice(0, 15);
+  const top = all.slice(0, 30);
 
   const perfMode = (function() { try { return localStorage.getItem('ff_perf_mode') || 'all'; } catch(e) { return 'all'; } })();
   // 'ticker' = 2-line scrolling strip, 'grid' = wrapping card grid
@@ -5432,14 +5442,18 @@ function toggleRecap() {
 
 function getRecapData() {
   const leagues = [];
-  const showingPrevWeek = STATE.recapWeek !== STATE.week && STATE.recapWeek > 0;
+  const viewWeek = STATE.recapWeek;
+  const showingPrevWeek = viewWeek !== STATE.week && viewWeek > 0;
+  const cached = showingPrevWeek ? STATE.recapWeekCache[viewWeek] : null;
 
   // ── Sleeper ────────────────────────────────────────────────────
   for (const league of STATE.sleeperLeagues) {
     if (league.error || !league._allMatchups) continue;
-    const matchups = (showingPrevWeek && league._recapMatchups?.length)
-      ? league._recapMatchups
-      : league._allMatchups;
+    const matchups = cached?.sleeper?.[league.league_id]?.length
+      ? cached.sleeper[league.league_id]
+      : (showingPrevWeek && league._recapMatchups?.length)
+        ? league._recapMatchups
+        : league._allMatchups;
     const rosters = league._allRosters || [];
     const users = league._allUsers || [];
     const nameMap = {};
@@ -5521,7 +5535,9 @@ function getRecapData() {
 
   // ── ESPN ───────────────────────────────────────────────────────
   for (const league of STATE.espnLeagues) {
-    const raw = (showingPrevWeek && league._recapRaw) ? league._recapRaw : league.raw;
+    const raw = cached?.espn?.[league.leagueId]
+      ? cached.espn[league.leagueId]
+      : (showingPrevWeek && league._recapRaw) ? league._recapRaw : league.raw;
     if (!raw) continue;
     const schedule = raw.schedule || [];
     const teams = raw.teams || [];
@@ -5530,7 +5546,7 @@ function getRecapData() {
       teamMap[t.id] = t.name || [t.location, t.nickname].filter(Boolean).join(' ') || `Team ${t.id}`;
     });
 
-    const recapWeekNum = showingPrevWeek ? STATE.recapWeek : STATE.week;
+    const recapWeekNum = showingPrevWeek ? viewWeek : STATE.week;
     const weekMatchups = schedule.filter(m => m.matchupPeriodId === recapWeekNum);
     const results = [];
     for (const m of weekMatchups) {
@@ -5629,7 +5645,82 @@ function getRecapData() {
     });
   }
 
+  // ── Yahoo ──────────────────────────────────────────────────────
+  for (const league of (STATE.yahooLeagues || [])) {
+    if (league.error) continue;
+    const yahooCache = cached?.yahoo?.[league.leagueKey || league.id];
+    const myScore = yahooCache ? yahooCache.myScore : (league.myScore || 0);
+    const oppScore = yahooCache ? yahooCache.oppScore : (league.oppScore || 0);
+    const myName = yahooCache ? (yahooCache.myTeam || league.myName || 'My Team') : (league.myName || 'My Team');
+    const oppName = yahooCache ? (yahooCache.oppTeam || league.oppName || 'Opponent') : (league.oppName || 'Opponent');
+
+    if (myScore === 0 && oppScore === 0) continue;
+
+    const results = [{
+      team1: myName, team2: oppName,
+      score1: myScore, score2: oppScore,
+      margin: +Math.abs(myScore - oppScore).toFixed(2),
+      winner: myScore > oppScore ? myName : oppName,
+    }];
+
+    leagues.push({
+      id: league.leagueKey || league.id || 'yahoo', name: league.name, platform: 'yahoo',
+      results, benchRegrets: [], benchTotal: 0, starterTotal: myScore, mvp: null,
+    });
+  }
+
   return leagues;
+}
+
+async function fetchRecapWeekData(week) {
+  if (STATE.recapWeekCache[week]) return STATE.recapWeekCache[week];
+  const data = { sleeper: {}, espn: {} };
+
+  // Sleeper
+  for (const league of STATE.sleeperLeagues) {
+    if (league.error) continue;
+    try {
+      const matchups = await fetchJSON(`${SLEEPER_API}/league/${league.league_id}/matchups/${week}`);
+      data.sleeper[league.league_id] = matchups || [];
+    } catch { data.sleeper[league.league_id] = []; }
+  }
+
+  // ESPN
+  for (const league of STATE.espnLeagues) {
+    if (!league.leagueId) continue;
+    try {
+      const raw = await fetchJSON(`/proxy/espn/${league.leagueId}/${week}`);
+      data.espn[league.leagueId] = raw;
+    } catch { data.espn[league.leagueId] = null; }
+  }
+
+  // Yahoo — use weekly_snapshots for historical data
+  data.yahoo = {};
+  for (const league of (STATE.yahooLeagues || [])) {
+    if (league.error) continue;
+    const key = league.leagueKey || league.id;
+    try {
+      const snapshots = await fetchJSON(`/api/snapshots/${encodeURIComponent(key)}/${STATE.season}/${week}`);
+      if (snapshots && snapshots.length > 0) {
+        const s = snapshots[0];
+        data.yahoo[key] = { myScore: s.my_score, oppScore: s.opp_score, myTeam: s.my_team, oppTeam: s.opp_team };
+      }
+    } catch { data.yahoo[key] = null; }
+  }
+
+  STATE.recapWeekCache[week] = data;
+  return data;
+}
+
+async function switchRecapWeek(val) {
+  const week = parseInt(val);
+  STATE.recapViewWeek = week;
+  STATE.recapWeek = week;
+  STATE.optimalWeek = week;
+  if (week !== STATE.week) {
+    await fetchRecapWeekData(week);
+  }
+  renderRecap();
 }
 
 function renderRecap() {
@@ -5638,14 +5729,26 @@ function renderRecap() {
   section.style.display = leagues.length > 0 ? '' : 'none';
   if (leagues.length === 0) return;
 
-  // Update title to show which week
+  // Update title and week selector
   const titleEl = section.querySelector('.recap-title');
   if (titleEl) {
-    const liveWeek = STATE.recapWeek === STATE.week;
     titleEl.textContent = STATE.recapWeek > 0
       ? `Week ${STATE.recapWeek} Recap`
       : (STATE.week > 0 ? `Week ${STATE.week} Recap` : 'Weekly Recap');
   }
+  const weekSelect = document.getElementById('recap-week-select');
+  if (weekSelect && weekSelect.options.length === 0) {
+    for (let w = STATE.week; w >= 1; w--) {
+      const opt = document.createElement('option');
+      opt.value = w;
+      opt.textContent = `Week ${w}`;
+      if (w === STATE.recapWeek) opt.selected = true;
+      weekSelect.appendChild(opt);
+    }
+  } else if (weekSelect) {
+    weekSelect.value = STATE.recapWeek;
+  }
+  const liveWeek = STATE.recapWeek === STATE.week;
 
   // Tabs
   const tabsEl = document.getElementById('recap-league-tabs');
@@ -5663,7 +5766,6 @@ function renderRecap() {
   const container = document.getElementById('recap-content');
 
   // Build cards
-  const liveWeek = STATE.recapWeek === STATE.week;
   let html = '<div class="recap-grid">';
   if (liveWeek) {
     html += `<div class="recap-tbd-banner recap-section-full">
@@ -5993,6 +6095,46 @@ function toggleWaivers() {
   if (isOpen) renderWaivers();
 }
 
+// Compute projected pts using league-specific scoring via Sleeper per-stat projections
+function calcProjByName(name, pos, scoring) {
+  if (!scoring) return null;
+  const key = normalizeFPName(name) + ':' + pos;
+  const sl = STATE.projLookupMap?.[key];
+  if (!sl || !sl.pid) return null;
+  const pts = calcProjected(sl.pid, scoring);
+  return pts > 0 ? Math.round(pts * 100) / 100 : null;
+}
+
+const ESPN_YAHOO_SCORING = {
+  'bye-week-baddies': {
+    pass_yd: 0.04, pass_td: 4, pass_int: -2, rush_yd: 0.1, rush_td: 6,
+    rec: 1, rec_yd: 0.1, rec_td: 6, fum_lost: -2, pass_2pt: 2, rush_2pt: 2, rec_2pt: 2,
+    fgm_0_19: 3, fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 4, fgm_50_59: 5, fgm_60p: 6, fgmiss: -1, xpm: 1,
+    sack: 1, int: 2, fum_rec: 2, safe: 2, blk_kick: 2, def_td: 6, st_td: 6,
+    pts_allow_0: 5, pts_allow_1_6: 4, pts_allow_7_13: 3, pts_allow_14_20: 1, pts_allow_28_34: -1, pts_allow_35p: -3,
+  },
+  'sunday-funday': {
+    pass_yd: 0.04, pass_td: 4, pass_int: -2, rush_yd: 0.1, rush_td: 6,
+    rec: 0, rec_yd: 0.1, rec_td: 6, fum_lost: -2, pass_2pt: 2, rush_2pt: 2, rec_2pt: 2,
+    fgm_0_19: 3, fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 4, fgm_50_59: 5, fgm_60p: 5, fgmiss: -1, xpm: 1,
+    sack: 1, int: 2, fum_rec: 2, safe: 2, blk_kick: 2, def_td: 6, st_td: 6,
+    pts_allow_0: 5, pts_allow_1_6: 4, pts_allow_7_13: 3, pts_allow_14_20: 1, pts_allow_28_34: -1, pts_allow_35p: -3,
+  },
+  'who-is-jessica': {
+    pass_yd: 0.04, pass_td: 4, pass_int: -1, rush_yd: 0.1, rush_td: 6,
+    rec: 0, rec_yd: 0.1, rec_td: 6, fum_lost: 0, pass_2pt: 2, rush_2pt: 2, rec_2pt: 2,
+    fgm_0_19: 3, fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 3, fgm_50_59: 4, fgm_60p: 5, fgmiss: -1, xpm: 1,
+    sack: 1, int: 2, fum_rec: 2, safe: 2, blk_kick: 2, def_td: 6, st_td: 6,
+    pts_allow_0: 10, pts_allow_1_6: 7, pts_allow_7_13: 4, pts_allow_14_20: 1, pts_allow_28_34: -1, pts_allow_35p: -4,
+  },
+};
+
+function getLeagueScoring(entry) {
+  if (entry.platform === 'sleeper') return entry.league.scoring;
+  const key = entry.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return ESPN_YAHOO_SCORING[key] || null;
+}
+
 function getWaiverLeagues() {
   const leagues = [];
   // Sleeper leagues
@@ -6226,7 +6368,9 @@ async function renderWaivers() {
     const posClass = `pos-${a.pos}`;
     const fp = fpLookup(a.name, a.pos);
     const fpBadge = fp ? fpBadgeHTML(fp, { showPts: false }) : '<span class="fp-rank fp-none" title="Not in FP ECR">—</span>';
-    const wwPts = sl?.projPts || a.projPts || 0;
+    const leagueScoring = getLeagueScoring(entry);
+    const customPts = leagueScoring ? calcProjByName(a.name, a.pos, leagueScoring) : null;
+    const wwPts = customPts ?? sl?.projPts ?? a.projPts ?? 0;
     return `<tr>
       <td style="width:32px;text-align:center;color:var(--text-muted);font-size:12px;">${i + 1}</td>
       <td><span class="player-pos ${posClass}" style="display:inline-block;margin-right:8px;">${a.pos}</span>${esc(a.name)}${injBadge}</td>
@@ -6605,7 +6749,7 @@ function buildProjLookup() {
     const key = normalizeFPName(p.full_name) + ':' + p.position;
     if (!STATE.projLookupMap[key]) {
       STATE.projLookupMap[key] = {
-        name: p.full_name, pos: p.position, team: p.team || '',
+        pid, name: p.full_name, pos: p.position, team: p.team || '',
         projPts: Math.round(pts * 100) / 100,
         injuryStatus: p.injury_status || null,
         injuryBodyPart: p.injury_body_part || null,
@@ -7962,9 +8106,9 @@ function showToast(message, type = 'td') {
   const toast = document.createElement('div');
   toast.className = 'toast ' + type;
   toast.innerHTML = message;
+  toast.style.cursor = 'pointer';
+  toast.addEventListener('click', () => { toast.remove(); });
   container.appendChild(toast);
-  // CSS animation handles fade-out at 4s, remove after 4.5s
-  setTimeout(() => { toast.remove(); }, 4500);
 }
 
 function flashPlayerRow(playerName) {
