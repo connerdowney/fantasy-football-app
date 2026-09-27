@@ -6109,21 +6109,21 @@ const ESPN_YAHOO_SCORING = {
   'bye-week-baddies': {
     pass_yd: 0.04, pass_td: 4, pass_int: -2, rush_yd: 0.1, rush_td: 6,
     rec: 1, rec_yd: 0.1, rec_td: 6, fum_lost: -2, pass_2pt: 2, rush_2pt: 2, rec_2pt: 2,
-    fgm_0_19: 3, fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 4, fgm_50_59: 5, fgm_60p: 6, fgmiss: -1, xpm: 1,
+    fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 4, fgm_50p: 5, fgmiss_30_39: -1, fgmiss_40_49: -1, fgmiss_50p: -1, xpm: 1,
     sack: 1, int: 2, fum_rec: 2, safe: 2, blk_kick: 2, def_td: 6, st_td: 6,
     pts_allow_0: 5, pts_allow_1_6: 4, pts_allow_7_13: 3, pts_allow_14_20: 1, pts_allow_28_34: -1, pts_allow_35p: -3,
   },
   'sunday-funday': {
     pass_yd: 0.04, pass_td: 4, pass_int: -2, rush_yd: 0.1, rush_td: 6,
     rec: 0, rec_yd: 0.1, rec_td: 6, fum_lost: -2, pass_2pt: 2, rush_2pt: 2, rec_2pt: 2,
-    fgm_0_19: 3, fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 4, fgm_50_59: 5, fgm_60p: 5, fgmiss: -1, xpm: 1,
+    fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 4, fgm_50p: 5, fgmiss_30_39: -1, fgmiss_40_49: -1, fgmiss_50p: -1, xpm: 1,
     sack: 1, int: 2, fum_rec: 2, safe: 2, blk_kick: 2, def_td: 6, st_td: 6,
     pts_allow_0: 5, pts_allow_1_6: 4, pts_allow_7_13: 3, pts_allow_14_20: 1, pts_allow_28_34: -1, pts_allow_35p: -3,
   },
   'who-is-jessica': {
     pass_yd: 0.04, pass_td: 4, pass_int: -1, rush_yd: 0.1, rush_td: 6,
     rec: 0, rec_yd: 0.1, rec_td: 6, fum_lost: 0, pass_2pt: 2, rush_2pt: 2, rec_2pt: 2,
-    fgm_0_19: 3, fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 3, fgm_50_59: 4, fgm_60p: 5, fgmiss: -1, xpm: 1,
+    fgm_20_29: 3, fgm_30_39: 3, fgm_40_49: 3, fgm_50p: 4, fgmiss_30_39: -1, fgmiss_40_49: -1, fgmiss_50p: -1, xpm: 1,
     sack: 1, int: 2, fum_rec: 2, safe: 2, blk_kick: 2, def_td: 6, st_td: 6,
     pts_allow_0: 10, pts_allow_1_6: 7, pts_allow_7_13: 4, pts_allow_14_20: 1, pts_allow_28_34: -1, pts_allow_35p: -4,
   },
@@ -8842,6 +8842,9 @@ function autoSnapshotToServer() {
       const myPts = (my.starters || []).reduce((s, pid) => s + ((my.players_points || {})[pid] || 0), 0);
       const opp = league._allMatchups?.find(m => m.matchup_id === my.matchup_id && m.roster_id !== my.roster_id);
       const oppPts = opp ? (opp.starters || []).reduce((s, pid) => s + ((opp.players_points || {})[pid] || 0), 0) : 0;
+      const scoring = league.scoring;
+      const myProj = scoring ? calcTeamProjected(my, scoring) : null;
+      const oppProj = scoring && opp ? calcTeamProjected(opp, scoring) : null;
 
       payload.leagues.push({
         platform: "sleeper",
@@ -8849,25 +8852,42 @@ function autoSnapshotToServer() {
         league_name: league.name || league.league_id,
         my_score: +myPts.toFixed(2),
         opp_score: +oppPts.toFixed(2),
-        my_projected: league.myProjected || null,
-        opp_projected: league.oppProjected || null,
+        my_projected: myProj ? +myProj.toFixed(2) : null,
+        opp_projected: oppProj ? +oppProj.toFixed(2) : null,
         result: myPts > oppPts ? "W" : myPts < oppPts ? "L" : "T",
       });
     }
 
     // ESPN leagues
     for (const league of (STATE.espnLeagues || [])) {
-      if (league.error || !league.myTeam) continue;
+      if (league.error || !league.matchups?.length) continue;
+      const m = league.matchups[0];
+      const espnScoring = getLeagueScoring({ name: league.name, platform: 'espn' });
+      function espnRosterProj(rosterEntries, scoring) {
+        if (!scoring || !rosterEntries?.entries?.length) return null;
+        let total = 0;
+        for (const e of rosterEntries.entries) {
+          if (e.lineupSlotId === 20 || e.lineupSlotId === 21) continue;
+          const p = e.playerPoolEntry?.player;
+          if (!p) continue;
+          const pos = ESPN_POS[p.defaultPositionId] || '';
+          const pts = calcProjByName(p.fullName || '', pos, scoring);
+          if (pts) total += pts;
+        }
+        return total;
+      }
+      const espnMyProj = espnRosterProj(m.myRoster, espnScoring);
+      const espnOppProj = espnRosterProj(m.oppRoster, espnScoring);
       payload.leagues.push({
         platform: "espn",
-        league_id: league.id?.toString() || "",
+        league_id: league.leagueId || "",
         league_name: league.name || "ESPN League",
-        my_score: league.myTeam.totalPoints || 0,
-        opp_score: league.opponent?.totalPoints || 0,
-        my_projected: league.myTeam.projectedPoints || null,
-        opp_projected: league.opponent?.projectedPoints || null,
-        result: (league.myTeam.totalPoints || 0) > (league.opponent?.totalPoints || 0) ? "W" :
-                (league.myTeam.totalPoints || 0) < (league.opponent?.totalPoints || 0) ? "L" : "T",
+        my_score: m.myScore || 0,
+        opp_score: m.oppScore || 0,
+        my_projected: espnMyProj ? +espnMyProj.toFixed(2) : null,
+        opp_projected: espnOppProj ? +espnOppProj.toFixed(2) : null,
+        result: (m.myScore || 0) > (m.oppScore || 0) ? "W" :
+                (m.myScore || 0) < (m.oppScore || 0) ? "L" : "T",
       });
     }
 
