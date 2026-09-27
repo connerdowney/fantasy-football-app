@@ -539,7 +539,7 @@ function dismissAlert(alertId) {
 // Forecast Logging
 // ---------------------------------------------------------------------------
 
-function logForecasts(matchups) {
+function logForecasts(matchups, isPregameOverride) {
   const season = new Date().getFullYear();
   const capturedAt = now();
   const stmt = db.prepare(`
@@ -550,7 +550,7 @@ function logForecasts(matchups) {
   const insert = db.transaction((items) => {
     let count = 0;
     for (const m of items) {
-      const isPregame = (m.myScore === 0 && m.oppScore === 0) ? 1 : 0;
+      const isPregame = isPregameOverride ? 1 : ((m.myScore === 0 && m.oppScore === 0) ? 1 : 0);
       // Throttle: skip if we logged this league within the last 5 minutes
       const recent = db.prepare(
         'SELECT captured_at FROM forecast_log WHERE season = ? AND week = ? AND platform = ? AND league_id = ? ORDER BY captured_at DESC LIMIT 1'
@@ -770,11 +770,11 @@ routes.post('/api/alerts/:alertId/dismiss', (req, res) => {
 // POST /api/forecast — log current projections and win probability for trend tracking
 routes.post('/api/forecast', (req, res) => {
   try {
-    const { matchups } = req.body;
+    const { matchups, isPregame } = req.body;
     if (!matchups || !Array.isArray(matchups)) {
       return res.status(400).json({ error: 'matchups array required' });
     }
-    const saved = logForecasts(matchups);
+    const saved = logForecasts(matchups, !!isPregame);
     res.json({ success: true, saved });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -793,6 +793,84 @@ routes.get('/api/forecast/:season/:week', (req, res) => {
       rows = db.prepare('SELECT * FROM forecast_log WHERE season = ? AND week = ? ORDER BY captured_at ASC').all(parseInt(season), parseInt(week));
     }
     res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/coaching-score/:season/:week — pre-game forecast vs final result
+routes.get('/api/coaching-score/:season/:week', (req, res) => {
+  try {
+    const season = parseInt(req.params.season);
+    const week = parseInt(req.params.week);
+
+    // Get pre-game forecasts (earliest capture per league, or is_pregame=1)
+    const forecasts = db.prepare(`
+      SELECT league_id, league_name, platform, my_proj, opp_proj, my_win_prob
+      FROM forecast_log
+      WHERE season = ? AND week = ? AND is_pregame = 1
+    `).all(season, week);
+
+    // Fallback: if no pre-game flags, use earliest capture per league
+    let pregame = forecasts;
+    if (!pregame.length) {
+      pregame = db.prepare(`
+        SELECT f.league_id, f.league_name, f.platform, f.my_proj, f.opp_proj, f.my_win_prob
+        FROM forecast_log f
+        INNER JOIN (
+          SELECT league_id, MIN(captured_at) as min_ts
+          FROM forecast_log WHERE season = ? AND week = ?
+          GROUP BY league_id
+        ) m ON f.league_id = m.league_id AND f.captured_at = m.min_ts
+        WHERE f.season = ? AND f.week = ?
+      `).all(season, week, season, week);
+    }
+
+    // Get final results
+    const finals = db.prepare(`
+      SELECT league_id, league_name, platform, my_score, opp_score, result
+      FROM weekly_snapshots
+      WHERE season = ? AND week = ?
+    `).all(season, week);
+
+    const finalsMap = {};
+    finals.forEach(f => { finalsMap[f.league_id] = f; });
+
+    // Get latest live forecasts per league
+    const latest = db.prepare(`
+      SELECT f.league_id, f.my_proj, f.opp_proj, f.my_win_prob, f.my_score, f.opp_score
+      FROM forecast_log f
+      INNER JOIN (
+        SELECT league_id, MAX(captured_at) as max_ts
+        FROM forecast_log WHERE season = ? AND week = ?
+        GROUP BY league_id
+      ) m ON f.league_id = m.league_id AND f.captured_at = m.max_ts
+      WHERE f.season = ? AND f.week = ?
+    `).all(season, week, season, week);
+
+    const latestMap = {};
+    latest.forEach(l => { latestMap[l.league_id] = l; });
+
+    const scores = pregame.map(pg => {
+      const final = finalsMap[pg.league_id];
+      const live = latestMap[pg.league_id];
+      const pregameWinPred = pg.my_proj && pg.opp_proj ? pg.my_proj > pg.opp_proj : null;
+      const actualWin = final ? final.result === 'W' : null;
+      const projError = final && pg.my_proj ? Math.abs(pg.my_proj - final.my_score) : null;
+
+      return {
+        league_id: pg.league_id,
+        league_name: pg.league_name,
+        platform: pg.platform,
+        pregame: { my_proj: pg.my_proj, opp_proj: pg.opp_proj, win_prob: pg.my_win_prob },
+        live: live ? { my_proj: live.my_proj, opp_proj: live.opp_proj, win_prob: live.my_win_prob, my_score: live.my_score, opp_score: live.opp_score } : null,
+        final: final ? { my_score: final.my_score, opp_score: final.opp_score, result: final.result } : null,
+        pregame_correct: pregameWinPred !== null && actualWin !== null ? pregameWinPred === actualWin : null,
+        proj_error: projError ? Math.round(projError * 100) / 100 : null
+      };
+    });
+
+    res.json({ season, week, scores });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

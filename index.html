@@ -8157,6 +8157,20 @@ async function loadTrendsData() {
       return;
     }
 
+    // Fetch coaching score (forecast accuracy) for all weeks with data
+    const maxWeek = Math.max(...data.leagues.flatMap(l => l.weeks.map(w => w.week)));
+    const coachingPromises = [];
+    for (let w = 1; w <= maxWeek; w++) {
+      coachingPromises.push(fetchJSON(`/api/coaching-score/${season}/${w}`).catch(() => null));
+    }
+    const coachingResults = await Promise.all(coachingPromises);
+    data.coaching = {};
+    for (const cr of coachingResults) {
+      if (cr && cr.scores && cr.scores.length) {
+        data.coaching[cr.week] = cr.scores;
+      }
+    }
+
     trendsDataCache = data;
     renderTrends(data);
   } catch (err) {
@@ -8315,6 +8329,73 @@ function renderTrends(data) {
     </div>`;
   }
   html += '</div>';
+
+  // Forecast Accuracy section (coaching score from projections vs actuals)
+  if (data.coaching && Object.keys(data.coaching).length > 0) {
+    html += '<div style="margin-top:var(--space-lg);">';
+    html += '<h3 style="font-size:15px;font-weight:600;margin-bottom:var(--space-md);">Forecast Accuracy</h3>';
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:var(--space-md);">';
+
+    // Group by league across weeks
+    const leagueForecast = {};
+    for (const [week, scores] of Object.entries(data.coaching)) {
+      for (const s of scores) {
+        if (!leagueForecast[s.league_id]) leagueForecast[s.league_id] = { name: s.league_name, platform: s.platform, weeks: {} };
+        leagueForecast[s.league_id].weeks[week] = s;
+      }
+    }
+
+    for (const [lid, lf] of Object.entries(leagueForecast)) {
+      const weekNums = Object.keys(lf.weeks).map(Number).sort((a,b) => a - b);
+      const correct = weekNums.filter(w => lf.weeks[w].pregame_correct === true).length;
+      const total = weekNums.filter(w => lf.weeks[w].pregame_correct !== null).length;
+      const accuracy = total > 0 ? Math.round((correct / total) * 100) : null;
+      const accColor = accuracy !== null ? (accuracy >= 60 ? 'var(--green)' : accuracy >= 40 ? 'var(--amber)' : 'var(--red)') : 'var(--text-muted)';
+
+      let rows = '';
+      for (const w of weekNums) {
+        const s = lf.weeks[w];
+        if (!s.pregame || (!s.pregame.my_proj && !s.pregame.opp_proj)) continue;
+        const projWin = s.pregame.my_proj > s.pregame.opp_proj;
+        const projLabel = projWin ? 'W' : 'L';
+        const projColor = projWin ? 'var(--green)' : 'var(--red)';
+        const actualLabel = s.final ? s.final.result : '—';
+        const actualColor = actualLabel === 'W' ? 'var(--green)' : actualLabel === 'L' ? 'var(--red)' : 'var(--text-muted)';
+        const projErr = s.proj_error != null ? s.proj_error.toFixed(1) : '—';
+        const match = s.pregame_correct === true ? '✓' : s.pregame_correct === false ? '✗' : '—';
+        const matchColor = s.pregame_correct === true ? 'var(--green)' : s.pregame_correct === false ? 'var(--red)' : 'var(--text-muted)';
+
+        rows += '<tr style="font-size:12px;">'
+          + '<td style="padding:3px 6px;">Wk ' + w + '</td>'
+          + '<td style="padding:3px 6px;text-align:right;">' + (s.pregame.my_proj ? s.pregame.my_proj.toFixed(1) : '—') + '</td>'
+          + '<td style="padding:3px 6px;text-align:right;">' + (s.final ? s.final.my_score.toFixed(1) : '—') + '</td>'
+          + '<td style="padding:3px 6px;text-align:right;color:' + projColor + ';">' + projLabel + '</td>'
+          + '<td style="padding:3px 6px;text-align:right;color:' + actualColor + ';">' + actualLabel + '</td>'
+          + '<td style="padding:3px 6px;text-align:center;color:' + matchColor + ';font-weight:700;">' + match + '</td>'
+          + '<td style="padding:3px 6px;text-align:right;">' + projErr + '</td>'
+          + '</tr>';
+      }
+
+      html += '<div class="card platform-border-' + lf.platform + '">'
+        + '<div class="card-inner">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+        + '<div style="font-weight:600;font-size:14px;">' + esc(lf.name) + '</div>'
+        + '<div style="font-size:13px;font-weight:700;color:' + accColor + ';">' + (accuracy !== null ? accuracy + '% correct' : 'No data') + '</div>'
+        + '</div>'
+        + '<table style="width:100%;border-collapse:collapse;">'
+        + '<thead><tr style="font-size:11px;color:var(--text-muted);border-bottom:1px solid var(--card-border);">'
+        + '<th style="padding:3px 6px;text-align:left;">Week</th>'
+        + '<th style="padding:3px 6px;text-align:right;">Proj</th>'
+        + '<th style="padding:3px 6px;text-align:right;">Actual</th>'
+        + '<th style="padding:3px 6px;text-align:right;">Pred</th>'
+        + '<th style="padding:3px 6px;text-align:right;">Result</th>'
+        + '<th style="padding:3px 6px;text-align:center;">Hit</th>'
+        + '<th style="padding:3px 6px;text-align:right;">Error</th>'
+        + '</tr></thead><tbody>' + rows + '</tbody></table>'
+        + '</div></div>';
+    }
+    html += '</div></div>';
+  }
 
   container.innerHTML = html;
 }
@@ -8650,10 +8731,14 @@ function logForecastToServer() {
 
     if (matchups.length === 0) return;
 
+    // Detect pre-game: if total scores across all matchups < 1, games haven't started
+    const totalScores = matchups.reduce((s, m) => s + (m.myScore || 0) + (m.oppScore || 0), 0);
+    const isPregame = totalScores < 1;
+
     fetch('/api/forecast', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ matchups }),
+      body: JSON.stringify({ matchups, isPregame }),
     }).then(r => r.json()).then(res => {
       if (res.saved) console.log('[Forecast] Logged', res.saved, 'matchups');
     }).catch(err => console.warn('[Forecast]', err.message));
