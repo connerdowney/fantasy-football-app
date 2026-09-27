@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const db = require('./db-layer');
+const yahoo = require('./yahoo-oauth');
 
 // ═══════════════════════════════════════════════════════════════════
 // Debug Logger
@@ -414,15 +415,33 @@ app.post('/proxy/yahoo/extension', (req, res) => {
   res.json({ ok: true, received: new Date(yahooExtCache.receivedAt).toISOString() });
 });
 
-// Yahoo OAuth removed - using Chrome extension workaround only
+// Yahoo OAuth — primary data source, extension cache as fallback
+// Start auto-refresh timer on server boot
+if (yahoo.isConfigured()) {
+  yahoo.startAutoRefresh();
+  console.log('[Yahoo OAuth] Configured — auto-refresh enabled');
+} else {
+  console.log('[Yahoo OAuth] Not configured — run: node yahoo-auth-setup.js');
+}
 
-/** Check if Yahoo is configured (extension data only) */
+// In-memory cache for Yahoo API responses (avoid hammering the API)
+const yahooApiCache = {};
+const YAHOO_API_CACHE_TTL = 5 * 60 * 1000; // 5 min
+
+function yahooApiCached(key, fetcher) {
+  const cached = yahooApiCache[key];
+  if (cached && Date.now() - cached.time < YAHOO_API_CACHE_TTL) return Promise.resolve(cached.data);
+  return fetcher().then(data => { yahooApiCache[key] = { data, time: Date.now() }; return data; });
+}
+
 app.get('/proxy/yahoo/status', (_req, res) => {
+  const hasOAuth = yahoo.isConfigured();
   const hasExt = extCacheFresh();
   const hasStaleExt = !!yahooExtCache.receivedAt && !hasExt;
   res.json({
-    configured: hasExt || hasStaleExt,
-    source: hasExt ? 'extension' : hasStaleExt ? 'extension-stale' : 'none',
+    configured: hasOAuth || hasExt || hasStaleExt,
+    source: hasOAuth ? 'oauth' : hasExt ? 'extension' : hasStaleExt ? 'extension-stale' : 'none',
+    oauth: hasOAuth,
     extensionCache: {
       fresh: hasExt,
       hasData: !!yahooExtCache.receivedAt,
@@ -434,45 +453,87 @@ app.get('/proxy/yahoo/status', (_req, res) => {
   });
 });
 
-/** User's Yahoo Fantasy leagues for current NFL season (extension cache only) */
+/** User's Yahoo Fantasy leagues for current NFL season */
 app.get('/proxy/yahoo/leagues', async (_req, res) => {
-  if (extCacheFresh() && yahooExtCache.leagues) {
-    return res.set('Content-Type', 'application/json').send(yahooExtCache.leagues);
+  // OAuth primary
+  if (yahoo.isConfigured()) {
+    try {
+      const data = await yahooApiCached('leagues', () =>
+        yahoo.yahooAPI('/users;use_login=1/games;game_keys=nfl/leagues;out=metadata,settings,standings,scoreboard')
+      );
+      return res.json(data);
+    } catch (e) {
+      console.warn('[Yahoo API] leagues failed:', e.message);
+    }
   }
+  // Extension fallback
   if (yahooExtCache.leagues) {
     return res.set('Content-Type', 'application/json').send(yahooExtCache.leagues);
   }
-  res.status(503).json({ error: 'Yahoo extension data not available. Open the Yahoo Fantasy Chrome extension to sync.' });
+  res.status(503).json({ error: 'Yahoo not configured. Run: node yahoo-auth-setup.js' });
 });
 
-/** League scoreboard for a specific week (extension cache only) */
+/** League scoreboard for a specific week */
 app.get('/proxy/yahoo/scoreboard/:leagueKey/:week', async (req, res) => {
   const { leagueKey, week } = req.params;
+
+  if (yahoo.isConfigured()) {
+    try {
+      const data = await yahooApiCached(`scoreboard_${leagueKey}_${week}`, () =>
+        yahoo.yahooAPI(`/league/${leagueKey}/scoreboard;week=${week}`)
+      );
+      return res.json(data);
+    } catch (e) {
+      console.warn('[Yahoo API] scoreboard failed:', e.message);
+    }
+  }
+  // Extension fallback
   const cacheKey = `${leagueKey}_${week}`;
   if (yahooExtCache.scoreboards[cacheKey]) {
     return res.set('Content-Type', 'application/json').send(yahooExtCache.scoreboards[cacheKey]);
   }
-  // Fallback: extension cached this league at a different week (API week can lag UI by 1)
   const fallbackKey = Object.keys(yahooExtCache.scoreboards).find(k => k.startsWith(`${leagueKey}_`));
   if (fallbackKey) {
-    console.log(`[Yahoo Ext] Week mismatch: serving ${fallbackKey} for requested ${cacheKey}`);
     return res.set('Content-Type', 'application/json').send(yahooExtCache.scoreboards[fallbackKey]);
   }
-  res.status(503).json({ error: 'Yahoo extension data not available. Open the Yahoo Fantasy Chrome extension to sync.' });
+  res.status(503).json({ error: 'Yahoo scoreboard not available' });
 });
 
-/** Team roster (extension cache only) */
+/** Team roster */
 app.get('/proxy/yahoo/roster/:teamKey', async (req, res) => {
   const teamKey = req.params.teamKey;
+
+  if (yahoo.isConfigured()) {
+    try {
+      const data = await yahooApiCached(`roster_${teamKey}`, () =>
+        yahoo.yahooAPI(`/team/${teamKey}/roster;out=players`)
+      );
+      return res.json(data);
+    } catch (e) {
+      console.warn('[Yahoo API] roster failed:', e.message);
+    }
+  }
+  // Extension fallback
   if (yahooExtCache.rosters?.[teamKey]) {
     return res.set('Content-Type', 'application/json').send(yahooExtCache.rosters[teamKey]);
   }
-  res.status(503).json({ error: 'Yahoo extension data not available. Open the Yahoo Fantasy Chrome extension to sync.' });
+  res.status(503).json({ error: 'Yahoo roster not available' });
 });
 
-/** Yahoo league transactions (extension cache only) */
-app.get('/proxy/yahoo/transactions/:leagueId', async (req, res) => {
-  // Transactions not available via extension cache
+/** Yahoo league transactions */
+app.get('/proxy/yahoo/transactions/:leagueKey', async (req, res) => {
+  const { leagueKey } = req.params;
+
+  if (yahoo.isConfigured()) {
+    try {
+      const data = await yahooApiCached(`transactions_${leagueKey}`, () =>
+        yahoo.yahooAPI(`/league/${leagueKey}/transactions;types=add,drop,trade;count=25`)
+      );
+      return res.json(data);
+    } catch (e) {
+      console.warn('[Yahoo API] transactions failed:', e.message);
+    }
+  }
   res.json({ fantasy_content: { league: [{ transactions: [] }] } });
 });
 
@@ -961,7 +1022,25 @@ app.get('/api/news', async (req, res) => {
 // Yahoo Free Agents
 // ═══════════════════════════════════════════════════════════════════
 app.get('/proxy/yahoo/freeagents/:leagueKey', async (req, res) => {
-  res.status(503).json({ error: 'Yahoo free agents not available without OAuth. Use the Yahoo Fantasy app directly.' });
+  if (!yahoo.isConfigured()) {
+    return res.status(503).json({ error: 'Yahoo free agents require OAuth. Run: node yahoo-auth-setup.js' });
+  }
+  try {
+    const { leagueKey } = req.params;
+    const pos = req.query.position || '';
+    const count = Math.min(parseInt(req.query.count) || 25, 50);
+    const sort = req.query.sort || 'PTS';
+    let endpoint = `/league/${leagueKey}/players;status=FA;sort=${sort};count=${count}`;
+    if (pos) endpoint += `;position=${pos}`;
+    endpoint += ';out=stats,percent_owned';
+    const data = await yahooApiCached(`fa_${leagueKey}_${pos}_${sort}_${count}`, () =>
+      yahoo.yahooAPI(endpoint)
+    );
+    res.json(data);
+  } catch (e) {
+    console.warn('[Yahoo API] free agents failed:', e.message);
+    res.status(502).json({ error: 'Yahoo free agents lookup failed', detail: e.message });
+  }
 });
 
 

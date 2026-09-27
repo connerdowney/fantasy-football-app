@@ -3209,6 +3209,7 @@ header h1 {
     </div>
     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()" title="Refresh now"><span class="refresh-icon">&#8635;</span> Refresh</button>
     <button class="auto-refresh-toggle" id="auto-refresh-toggle" onclick="toggleAutoRefresh()" title="Auto-refresh every 2 minutes"><span class="auto-refresh-dot"></span>Auto</button>
+    <button class="auto-refresh-toggle" id="audio-toggle" onclick="toggleAudio()" title="Toggle audio alerts" style="font-size:13px;min-width:28px;padding:4px 6px;"></button>
     <span class="status-pill" id="status-pill">Idle</span>
   </div>
 </header>
@@ -3442,6 +3443,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // v1.1: Start gameday countdown timer
   updateCountdown();
+  updateAudioToggle();
   restoreAutoRefresh();
   setInterval(updateCountdown, 60000);
 });
@@ -4453,16 +4455,30 @@ function renderTopPerformers() {
     }
   }
 
-  // ESPN players
+  // ESPN players — extract per-player scores from roster entries
   for (const league of (STATE.espnLeagues || [])) {
-    if (league.error || !league._allRosters) continue;
-    for (const roster of league._allRosters) {
-      const status = roster.isMe ? 'mine' : roster.isOpp ? 'opp' : 'other';
-      for (const p of [...(roster.starters || []), ...(roster.bench || [])]) {
-        if (!p.actual || p.actual <= 0 || p.slot === 'BN' || p.slot === 'IR') continue;
-        const key = (p.playerName || '').toLowerCase().replace(/\s+/g, '_');
-        if (!key) continue;
-        addToSeen(key, { name: p.playerName, pos: p.pos || '??', team: '', pts: p.actual, status });
+    if (league.error) continue;
+    const teamMap = league.teamMap || {};
+    for (const matchup of (league.matchups || [])) {
+      for (const [roster, status] of [[matchup.myRoster, 'mine'], [matchup.oppRoster, 'opp']]) {
+        for (const entry of (roster || [])) {
+          const slot = ESPN_SLOT[entry.lineupSlotId];
+          if (slot === 'BN' || slot === 'IR') continue;
+          const player = entry.playerPoolEntry?.player || {};
+          const playerName = player.fullName || '';
+          if (!playerName) continue;
+          const pos = ESPN_POS[player.defaultPositionId] || '?';
+          let pts = 0;
+          for (const s of (player.stats || [])) {
+            if (s.scoringPeriodId === STATE.week && s.statSourceId === 0) {
+              pts = s.appliedTotal || 0;
+            }
+          }
+          if (pts <= 0) continue;
+          const key = playerName.toLowerCase().replace(/\s+/g, '_');
+          const team = (ESPN_TEAM[player.proTeamId] || '').toUpperCase();
+          addToSeen(key, { name: playerName, pos, team, pts, status });
+        }
       }
     }
   }
@@ -7814,6 +7830,77 @@ function renderQuickStats() {
 // Gameday Interactivity — toasts, deltas, banners, confetti
 // ═══════════════════════════════════════════════════════════════════
 
+// -- Audio alert system (Web Audio API — no external files) --
+let _audioCtx = null;
+let _audioEnabled = false;
+try { _audioEnabled = localStorage.getItem('ff_audio_alerts') !== 'false'; } catch {}
+
+function getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
+
+function playTone(freq, duration, type = 'sine', volume = 0.3) {
+  if (!_audioEnabled) return;
+  try {
+    const ctx = getAudioCtx();
+    if (ctx.state === 'suspended') ctx.resume();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(volume, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + duration);
+  } catch {}
+}
+
+function toggleAudio() {
+  _audioEnabled = !_audioEnabled;
+  try { localStorage.setItem('ff_audio_alerts', _audioEnabled); } catch {}
+  updateAudioToggle();
+  if (_audioEnabled) playScoreAlert(); // confirmation chime
+}
+
+function updateAudioToggle() {
+  const btn = document.getElementById('audio-toggle');
+  if (!btn) return;
+  btn.textContent = _audioEnabled ? '\u{1F50A}' : '\u{1F507}';
+  btn.title = _audioEnabled ? 'Audio alerts ON (click to mute)' : 'Audio alerts OFF (click to enable)';
+}
+
+function playScoreAlert() {
+  // Short rising chime
+  playTone(523, 0.15, 'sine', 0.2);
+  setTimeout(() => playTone(659, 0.15, 'sine', 0.2), 100);
+}
+
+function playTDAlert() {
+  // Triumphant fanfare — ascending notes
+  playTone(523, 0.2, 'square', 0.15);
+  setTimeout(() => playTone(659, 0.2, 'square', 0.15), 150);
+  setTimeout(() => playTone(784, 0.3, 'square', 0.15), 300);
+  setTimeout(() => playTone(1047, 0.4, 'square', 0.2), 500);
+}
+
+function playLeadChangeAlert() {
+  // Victory horn — bold descending-then-ascending
+  playTone(784, 0.15, 'sawtooth', 0.1);
+  setTimeout(() => playTone(659, 0.15, 'sawtooth', 0.1), 120);
+  setTimeout(() => playTone(784, 0.2, 'sawtooth', 0.12), 240);
+  setTimeout(() => playTone(1047, 0.5, 'sawtooth', 0.15), 400);
+}
+
+function playLeadLostAlert() {
+  // Descending minor tone
+  playTone(440, 0.2, 'sine', 0.15);
+  setTimeout(() => playTone(349, 0.2, 'sine', 0.15), 150);
+  setTimeout(() => playTone(294, 0.4, 'sine', 0.12), 300);
+}
+
 // -- Toast notification system --
 function showToast(message, type = 'td') {
   const container = document.getElementById('toast-container');
@@ -7844,9 +7931,12 @@ function detectScoreChanges(currentTopPerformers) {
     const diff = p.pts - prev;
     if (diff >= 6 && p.status === 'mine') {
       showToast('&#127944; ' + p.name + ' TD! +' + diff.toFixed(1) + ' pts', 'td');
+      playTDAlert();
     } else if (p.pts >= 20 && prev < 20 && p.status === 'mine') {
       showToast('&#11088; ' + p.name + ' hit 20+ pts!', 'milestone');
+      playScoreAlert();
     }
+    if (diff > 0 && diff < 6 && p.status === 'mine') playScoreAlert();
     deltas.push({ name: p.name, delta: diff });
     _prevPlayerScores[p.name] = p.pts;
   }
@@ -7911,6 +8001,10 @@ function checkLeadAndConfetti(leagues) {
     if (prev === 'trailing' && state === 'leading') {
       showToast('&#127881; You took the lead in ' + (lg.name || key) + '!', 'lead');
       triggerConfetti();
+      playLeadChangeAlert();
+    } else if (prev === 'leading' && state === 'trailing') {
+      showToast('&#128308; You lost the lead in ' + (lg.name || key), 'lead');
+      playLeadLostAlert();
     }
     _prevLeadState[key] = state;
   }
