@@ -5259,14 +5259,20 @@ function scoreCard({ id, name, platform, myName, oppName, myScore, oppScore, myP
 
   let myProjHtml = myProj != null ? `<div class="team-projected">Proj: ${myProj.toFixed(1)}</div>` : '';
   let oppProjHtml = oppProj != null ? `<div class="team-projected">Proj: ${oppProj.toFixed(1)}</div>` : '';
-  if (pregameMyProj != null && myProj != null && Math.abs(pregameMyProj - myProj) > 0.5) {
-    myProjHtml += `<div class="team-projected" style="font-size:9px;color:var(--text-muted);">Pre: ${pregameMyProj.toFixed(1)}</div>`;
+  if (pregameMyProj != null && myProj != null && (myScore + oppScore) > 0) {
+    const changed = Math.abs(pregameMyProj - myProj) > 0.5;
+    const style = changed ? 'font-size:9px;color:var(--amber);' : 'font-size:9px;color:var(--text-muted);';
+    myProjHtml += `<div class="team-projected" style="${style}">Pre: ${pregameMyProj.toFixed(1)}</div>`;
   }
-  if (pregameOppProj != null && oppProj != null && Math.abs(pregameOppProj - oppProj) > 0.5) {
-    oppProjHtml += `<div class="team-projected" style="font-size:9px;color:var(--text-muted);">Pre: ${pregameOppProj.toFixed(1)}</div>`;
+  if (pregameOppProj != null && oppProj != null && (myScore + oppScore) > 0) {
+    const changed = Math.abs(pregameOppProj - oppProj) > 0.5;
+    const style = changed ? 'font-size:9px;color:var(--amber);' : 'font-size:9px;color:var(--text-muted);';
+    oppProjHtml += `<div class="team-projected" style="${style}">Pre: ${pregameOppProj.toFixed(1)}</div>`;
   }
 
-  // Win probability: prefer platform-native value, fall back to projection ratio
+  // Win probability: prefer platform-native (ESPN), then projection ratio
+  // Yahoo/Sleeper projections are static pre-game values — they don't update live.
+  // For a live-adjusting %, we'd need Yahoo's native win_probability (blocked on API access).
   let winProbHtml = '';
   let myPct = 50;
   if (myWinProb != null) {
@@ -8760,6 +8766,7 @@ async function loadPregameForecasts() {
       for (const s of data.scores) {
         STATE.pregameForecasts[s.league_id] = s.pregame;
       }
+      renderAll();
     }
   } catch (e) { /* silent */ }
 }
