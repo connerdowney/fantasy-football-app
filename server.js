@@ -922,7 +922,7 @@ app.get('/api/news', async (req, res) => {
   // Rotowire RSS
   let rotowireItems = [];
   try {
-    const rssText = await fetchText('https://www.rotowire.com/football/rss-news.php');
+    const rssText = await fetchText('https://www.rotowire.com/rss/news.php?sport=NFL');
     const itemMatches = rssText.match(/<item>([\s\S]*?)<\/item>/g) || [];
     rotowireItems = itemMatches.slice(0, 30).map(function(item) {
       function getField(tag) {

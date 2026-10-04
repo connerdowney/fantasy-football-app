@@ -1645,7 +1645,7 @@ header h1 {
 .sections-grid.grid-tiles > div {
   margin: 0; max-width: none;
 }
-@media (max-width: 700px) {
+@media (max-width: 480px) {
   .sections-grid.grid-tiles { grid-template-columns: 1fr; }
 }
 
@@ -1709,7 +1709,7 @@ header h1 {
 .sections-grid.widget-tiles > div {
   margin: 0; max-width: none;
 }
-@media (max-width: 700px) {
+@media (max-width: 480px) {
   .sections-grid.widget-tiles { grid-template-columns: 1fr; }
   .widget-layout-bar { display: none !important; }
 }
@@ -4487,6 +4487,13 @@ let tickerStyle = localStorage.getItem('ff_ticker_style') || 'detailed'; // 'sim
 // ═══════════════════════════════════════════════════════════════════
 // Top Performers — Static grid replacing scrolling ticker
 // ═══════════════════════════════════════════════════════════════════
+function leagueAbbr(name) {
+  if (!name) return '';
+  const words = name.trim().split(/\s+/).filter(w => /[A-Za-z]/.test(w));
+  if (words.length >= 2) return words.map(w => w[0].toUpperCase()).join('').slice(0, 4);
+  return name.slice(0, 4).toUpperCase();
+}
+
 function renderTopPerformers() {
   const container = document.getElementById('top-performers-bar');
   if (!container) return;
@@ -4517,7 +4524,7 @@ function renderTopPerformers() {
         if (!p) continue;
         const name = p.full_name || (p.first_name + ' ' + p.last_name);
         const key = name.toLowerCase().replace(/\s+/g, '_');
-        addToSeen(key, { name, pos: p.position || '??', team: p.team || '', pts, status });
+        addToSeen(key, { name, pos: p.position || '??', team: p.team || '', pts, status, league: league.name || '' });
       }
     }
   }
@@ -4544,7 +4551,7 @@ function renderTopPerformers() {
           if (pts <= 0) continue;
           const key = playerName.toLowerCase().replace(/\s+/g, '_');
           const team = (ESPN_TEAM[player.proTeamId] || '').toUpperCase();
-          addToSeen(key, { name: playerName, pos, team, pts, status });
+          addToSeen(key, { name: playerName, pos, team, pts, status, league: league.name || '' });
         }
       }
     }
@@ -4601,6 +4608,7 @@ function renderTopPerformers() {
     const posClass = 'pos-' + p.pos;
     const isTD = p.pts >= 12;
     const teamStr = p.team ? `<span style="font-size:10px;color:var(--text-muted);font-weight:600;">${esc(p.team)}</span>` : '';
+    const leagueStr = p.league ? `<span style="font-size:9px;color:var(--text-muted);background:var(--card-border);border-radius:4px;padding:1px 4px;" title="${esc(p.league)}">${esc(leagueAbbr(p.league))}</span>` : '';
 
     if (displayMode === 'ticker') {
       // 2-line ticker card
@@ -4612,6 +4620,7 @@ function renderTopPerformers() {
         </div>
         <div class="tp-card-line2">
           ${teamStr}
+          ${leagueStr}
           <span class="tp-pts">${p.pts.toFixed(1)}</span>
           ${p._delta ? '<span class="tp-delta ' + (p._delta > 0 ? 'up' : 'down') + '">' + (p._delta > 0 ? '&#9650;' : '&#9660;') + Math.abs(p._delta).toFixed(1) + '</span>' : ''}
           ${isTD ? '<span style="font-size:10px;color:var(--green);font-weight:700;">TD</span>' : ''}
@@ -4623,6 +4632,7 @@ function renderTopPerformers() {
         <span class="tp-rank">${rank}</span>
         <span class="tp-pos ${posClass}">${p.pos}</span>
         ${statusDot}<span class="tp-name">${esc(p.name)}</span>
+        ${leagueStr}
         <span class="tp-pts">${p.pts.toFixed(1)}</span>
         ${p._delta ? '<span class="tp-delta ' + (p._delta > 0 ? 'up' : 'down') + '">' + (p._delta > 0 ? '&#9650;' : '&#9660;') + Math.abs(p._delta).toFixed(1) + '</span>' : ''}
       </div>`;
@@ -4637,6 +4647,7 @@ function renderTopPerformers() {
       const posClass = 'pos-' + p.pos;
       const isTD = p.pts >= 12;
       const teamStr = p.team ? `<span style="font-size:10px;color:var(--text-muted);font-weight:600;">${esc(p.team)}</span>` : '';
+      const leagueStr = p.league ? `<span style="font-size:9px;color:var(--text-muted);background:var(--card-border);border-radius:4px;padding:1px 4px;" title="${esc(p.league)}">${esc(leagueAbbr(p.league))}</span>` : '';
       html += `<div class="tp-card${isTD ? ' tp-td' : ''}" aria-hidden="true">
         <div class="tp-card-line1">
           <span class="tp-rank">${rank}</span>
@@ -4645,6 +4656,7 @@ function renderTopPerformers() {
         </div>
         <div class="tp-card-line2">
           ${teamStr}
+          ${leagueStr}
           <span class="tp-pts">${p.pts.toFixed(1)}</span>
           ${isTD ? '<span style="font-size:10px;color:var(--green);font-weight:700;">TD</span>' : ''}
         </div>
@@ -6629,12 +6641,6 @@ function renderNews() {
   const myNames = getMyPlayerNames();
   const oppNames = getOppPlayerNames();
 
-  const positions = ['ALL','QB','RB','WR','TE','K','DEF'];
-  const posPills = positions.map(function(p) {
-    const cnt = p === 'ALL' ? items.length : items.filter(function(n) { return n.player && n.player.pos === p; }).length;
-    return '<button class="news-pos-pill' + (curPos===p?' active':'') + '" onclick="window._newsFilterPos=\''+p+'\';renderNews();">'+p+'<span style="color:var(--text-muted);font-size:10px;margin-left:3px;">'+cnt+'</span></button>';
-  }).join('');
-
   const srcPills = '<button class="news-pos-pill'+(curSrc==='all'?' active':'')+'" onclick="window._newsFilterSrc=\'all\';renderNews();">All</button> '
     + '<button class="news-pos-pill'+(curSrc==='espn'?' active':'')+'" onclick="window._newsFilterSrc=\'espn\';renderNews();">ESPN</button> '
     + '<button class="news-pos-pill'+(curSrc==='rotowire'?' active':'')+'" onclick="window._newsFilterSrc=\'rotowire\';renderNews();">Rotowire</button>';
@@ -6681,7 +6687,6 @@ function renderNews() {
   }).join('');
 
   const rightCol = '<div><div class="news-pos-filter">'+rosterPills+'</div>'
-    + '<div class="news-pos-filter" style="margin-top:4px;">'+posPills+'</div>'
     + '<div class="news-pos-filter" style="margin-top:4px;">'+srcPills+'</div>'
     + '<div class="news-feed" style="max-height:70vh;overflow-y:auto;">'
     + (newsCards || '<div class="news-empty">No news yet — check back soon</div>')
@@ -6923,18 +6928,16 @@ function getRosterAlerts() {
       }
     });
 
-    // Check for IR-eligible bench players not in IR slot
+    // Check for IR-eligible bench players not in IR slot (only actual IR status, not Out/PUP/NFI/Sus)
     const hasIR = (league.rosterPositions || []).includes('IR');
     if (hasIR) {
-      const irSlots = (league.rosterPositions || []).filter(p => p === 'IR').length;
-      // Check if there are empty IR slots (players in starters fill named slots, rest is bench)
       benchIds.forEach(pid => {
         const p = STATE.players?.[pid];
         if (!p) return;
         const inj = p.injury_status;
-        if (inj && ['IR', 'Out', 'PUP', 'NFI', 'Sus'].includes(inj)) {
+        if (inj === 'IR') {
           const name = `${p.first_name || ''} ${p.last_name || ''}`.trim();
-          leagueAlerts.push({ type: 'ir-eligible', player: name, pos: p.position, msg: `${name} (${p.position}) is ${inj} - IR eligible` });
+          leagueAlerts.push({ type: 'ir-eligible', player: name, pos: p.position, msg: `${name} (${p.position}) is IR - IR eligible` });
         }
       });
     }
@@ -7021,17 +7024,19 @@ function getRosterAlerts() {
       }
     }
 
-    // Check bench for IR-eligible
-    for (const entry of matchup.myRoster) {
-      const slot = ESPN_SLOT[entry.lineupSlotId] || 'BN';
-      if (slot !== 'BN') continue;
-      const player = entry.playerPoolEntry?.player || {};
-      const inj = player.injuryStatus;
-      if (inj && ['OUT', 'INJURY_RESERVE', 'SUSPENSION'].includes(inj)) {
-        const name = player.fullName || 'Unknown';
-        const pos = ESPN_POS[player.defaultPositionId] || '?';
-        const label = inj === 'INJURY_RESERVE' ? 'IR' : inj.charAt(0) + inj.slice(1).toLowerCase();
-        leagueAlerts.push({ type: 'ir-eligible', player: name, pos, msg: `${name} (${pos}) is ${label} - IR eligible` });
+    // Check bench for IR-eligible (only leagues with an IR slot, only actual IR status)
+    const espnHasIR = (league.raw?.settings?.rosterSettings?.lineupSlotCounts?.['21'] || 0) > 0;
+    if (espnHasIR) {
+      for (const entry of matchup.myRoster) {
+        const slot = ESPN_SLOT[entry.lineupSlotId] || 'BN';
+        if (slot !== 'BN') continue;
+        const player = entry.playerPoolEntry?.player || {};
+        const inj = player.injuryStatus;
+        if (inj === 'INJURY_RESERVE') {
+          const name = player.fullName || 'Unknown';
+          const pos = ESPN_POS[player.defaultPositionId] || '?';
+          leagueAlerts.push({ type: 'ir-eligible', player: name, pos, msg: `${name} (${pos}) is IR - IR eligible` });
+        }
       }
     }
 
@@ -7258,8 +7263,159 @@ function renderStandings() {
 // ═══════════════════════════════════════════════════════════════════
 let olActiveLeague = null;
 
+function getOptimalLeagues() {
+  const leagues = [];
+  for (const l of STATE.sleeperLeagues) {
+    if (isBestBall(l.name)) continue;
+    if (!l.error && l.myMatchup) {
+      leagues.push({ id: l.league_id, name: l.name, platform: 'sleeper', league: l });
+    }
+  }
+  for (const l of STATE.espnLeagues) {
+    if (isBestBall(l.name)) continue;
+    if (l.matchups?.length && l.matchups[0]?.myRoster?.length) {
+      leagues.push({ id: l.league_id, name: l.name, platform: 'espn', league: l });
+    }
+  }
+  return leagues;
+}
 
+function computeOptimalSleeper(league, matchupOverride) {
+  const matchup = matchupOverride || league.myMatchup;
+  if (!matchup) return null;
 
+  const allPlayers = matchup.players || [];
+  const points = matchup.players_points || {};
+  const rosterPositions = (league.rosterPositions || []).filter(p => p !== 'BN' && p !== 'IR');
+
+  // Build player list with actual points
+  const playerList = allPlayers.map(pid => {
+    const p = STATE.players?.[pid];
+    return {
+      pid, pos: p?.position || '?',
+      name: p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : pid,
+      pts: points[pid] || 0,
+    };
+  }).sort((a, b) => b.pts - a.pts);
+
+  // Greedy optimal: fill each slot with highest-scoring eligible player
+  const used = new Set();
+  const optimal = [];
+
+  // Fill exact positions first, then flex
+  const exactSlots = rosterPositions.filter(s => !['FLEX','SUPER_FLEX','REC_FLEX','WRRB_FLEX','W/R/T','W/R','Q/W/R/T','IDP_FLEX'].includes(s));
+  const flexSlots = rosterPositions.filter(s => ['FLEX','SUPER_FLEX','REC_FLEX','WRRB_FLEX','W/R/T','W/R','Q/W/R/T','IDP_FLEX'].includes(s));
+
+  for (const slot of exactSlots) {
+    const best = playerList.find(p => p.pos === slot && !used.has(p.pid));
+    if (best) { used.add(best.pid); optimal.push({ ...best, slot }); }
+  }
+  for (const slot of flexSlots) {
+    const accepts = getFlexPositions(slot) || [];
+    const best = playerList.find(p => accepts.includes(p.pos) && !used.has(p.pid));
+    if (best) { used.add(best.pid); optimal.push({ ...best, slot }); }
+  }
+
+  const optimalPts = optimal.reduce((s, p) => s + p.pts, 0);
+
+  // Actual lineup
+  const starters = matchup.starters || [];
+  const actualPts = starters.reduce((s, pid) => s + (points[pid] || 0), 0);
+
+  // Find swaps: which optimal starters differ from actual
+  const actualSet = new Set(starters);
+  const optimalSet = new Set(optimal.map(p => p.pid));
+  const swapsIn = optimal.filter(p => !actualSet.has(p.pid));
+  const swapsOut = starters.filter(pid => !optimalSet.has(pid)).map(pid => {
+    const p = STATE.players?.[pid];
+    return {
+      pid, pos: p?.position || '?',
+      name: p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : pid,
+      pts: points[pid] || 0,
+    };
+  }).sort((a, b) => a.pts - b.pts);
+
+  return { optimalPts, actualPts, diff: optimalPts - actualPts, swapsIn, swapsOut };
+}
+
+function computeOptimalESPN(league, weekOverride, entriesOverride) {
+  const entries = entriesOverride || league.matchups[0]?.myRoster;
+  if (!entries?.length) return null;
+
+  const optWeek = weekOverride || STATE.week;
+  const rosterSlots = entries.filter(e => {
+    const slot = ESPN_SLOT[e.lineupSlotId];
+    return slot && slot !== 'BN' && slot !== 'IR';
+  }).map(e => ESPN_SLOT[e.lineupSlotId]);
+
+  // Build player list
+  const playerList = entries.map(entry => {
+    const player = entry.playerPoolEntry?.player || {};
+    const pos = ESPN_POS[player.defaultPositionId] || '?';
+    let pts = 0;
+    for (const s of (player.stats || [])) {
+      if (s.scoringPeriodId === optWeek && s.statSourceId === 0) pts = s.appliedTotal || 0;
+    }
+    return { pid: entry.playerId, pos, name: player.fullName || 'Unknown', pts, slotId: entry.lineupSlotId };
+  }).sort((a, b) => b.pts - a.pts);
+
+  // Get unique starting slot types from roster
+  const slotTypes = entries.filter(e => {
+    const slot = ESPN_SLOT[e.lineupSlotId];
+    return slot && slot !== 'BN' && slot !== 'IR';
+  }).map(e => e.lineupSlotId);
+
+  const exactSlots = slotTypes.filter(s => ![23, 7].includes(s)); // not FLEX/super
+  const flexSlots = slotTypes.filter(s => [23, 7].includes(s));
+
+  const used = new Set();
+  const optimal = [];
+
+  for (const slotId of exactSlots) {
+    const slotName = ESPN_SLOT[slotId];
+    const best = playerList.find(p => {
+      if (used.has(p.pid)) return false;
+      return p.pos === slotName;
+    });
+    if (best) { used.add(best.pid); optimal.push(best); }
+  }
+  for (const slotId of flexSlots) {
+    const slotName = ESPN_SLOT[slotId];
+    const accepts = getFlexPositions(slotName) || ['RB','WR','TE'];
+    const best = playerList.find(p => accepts.includes(p.pos) && !used.has(p.pid));
+    if (best) { used.add(best.pid); optimal.push(best); }
+  }
+
+  const optimalPts = optimal.reduce((s, p) => s + p.pts, 0);
+
+  // Actual starters
+  const actualStarters = entries.filter(e => {
+    const slot = ESPN_SLOT[e.lineupSlotId];
+    return slot && slot !== 'BN' && slot !== 'IR';
+  });
+  const actualPts = actualStarters.reduce((s, e) => {
+    const player = e.playerPoolEntry?.player || {};
+    let pts = 0;
+    for (const st of (player.stats || [])) {
+      if (st.scoringPeriodId === optWeek && st.statSourceId === 0) pts = st.appliedTotal || 0;
+    }
+    return s + pts;
+  }, 0);
+
+  const actualSet = new Set(actualStarters.map(e => e.playerId));
+  const optimalSet = new Set(optimal.map(p => p.pid));
+  const swapsIn = optimal.filter(p => !actualSet.has(p.pid));
+  const swapsOut = actualStarters.filter(e => !optimalSet.has(e.playerId)).map(e => {
+    const player = e.playerPoolEntry?.player || {};
+    let pts = 0;
+    for (const s of (player.stats || [])) {
+      if (s.scoringPeriodId === optWeek && s.statSourceId === 0) pts = s.appliedTotal || 0;
+    }
+    return { pid: e.playerId, pos: ESPN_POS[player.defaultPositionId] || '?', name: player.fullName || 'Unknown', pts };
+  }).sort((a, b) => a.pts - b.pts);
+
+  return { optimalPts, actualPts, diff: optimalPts - actualPts, swapsIn, swapsOut };
+}
 
 
 
