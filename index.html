@@ -2410,6 +2410,42 @@ header h1 {
 .toast.milestone { border-left: 3px solid var(--accent); }
 .toast.lead { border-left: 3px solid var(--green); }
 .toast.score { border-left: 3px solid var(--blue); }
+.notif-log-btn { position: relative; }
+.notif-log-badge {
+  position: absolute; top: -4px; right: -4px;
+  background: var(--red, #ef4444); color: #fff;
+  border-radius: 999px; font-size: 9px; font-weight: 700;
+  min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center;
+  padding: 0 3px; line-height: 1;
+}
+.notif-log-panel {
+  display: none;
+  position: absolute; top: calc(100% + 8px); right: 0;
+  width: 340px; max-height: 420px; overflow-y: auto;
+  background: var(--card); border: 1px solid var(--card-border);
+  border-radius: var(--radius-md); box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+  z-index: 10000; padding: 8px;
+}
+.notif-log-panel.open { display: block; }
+.notif-log-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 8px 8px; border-bottom: 1px solid var(--card-border); margin-bottom: 6px;
+}
+.notif-log-header h4 { margin: 0; font-size: 13px; }
+.notif-log-clear { font-size: 11px; color: var(--text-muted); cursor: pointer; background: none; border: none; }
+.notif-log-clear:hover { color: var(--text); }
+.notif-log-empty { padding: 20px 8px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.notif-log-item {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px; border-radius: 6px; font-size: 12px;
+}
+.notif-log-item:hover { background: var(--hover, rgba(128,128,128,0.08)); }
+.notif-log-item.td { border-left: 3px solid var(--green); }
+.notif-log-item.milestone { border-left: 3px solid var(--accent); }
+.notif-log-item.lead { border-left: 3px solid var(--green); }
+.notif-log-item.score { border-left: 3px solid var(--blue); }
+.notif-log-item-msg { color: var(--text); }
+.notif-log-item-time { color: var(--text-muted); font-size: 10px; }
 @keyframes playerFlash { 0%,100% { background: transparent; } 25%,75% { background: rgba(34,197,94,0.15); } }
 .player-row.flash { animation: playerFlash 2s ease; }
 @keyframes toastIn {
@@ -3212,6 +3248,16 @@ header h1 {
     <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()" title="Refresh now"><span class="refresh-icon">&#8635;</span> Refresh</button>
     <button class="auto-refresh-toggle" id="auto-refresh-toggle" onclick="toggleAutoRefresh()" title="Auto-refresh every 2 minutes"><span class="auto-refresh-dot"></span>Auto</button>
     <button class="auto-refresh-toggle" id="audio-toggle" onclick="toggleAudio()" title="Toggle audio alerts" style="font-size:13px;min-width:28px;padding:4px 6px;"></button>
+    <div style="position:relative;">
+      <button class="auto-refresh-toggle notif-log-btn" id="notif-log-btn" onclick="toggleNotifLogPanel(event)" title="Notification log" style="font-size:13px;min-width:28px;padding:4px 6px;">&#128276;<span class="notif-log-badge" id="notif-log-badge" style="display:none;">0</span></button>
+      <div class="notif-log-panel" id="notif-log-panel">
+        <div class="notif-log-header">
+          <h4>Notifications</h4>
+          <button class="notif-log-clear" onclick="clearNotifLog()">Clear all</button>
+        </div>
+        <div id="notif-log-list"></div>
+      </div>
+    </div>
     <span class="status-pill" id="status-pill">Idle</span>
   </div>
 </header>
@@ -8121,14 +8167,106 @@ function playLeadLostAlert() {
 // -- Toast notification system --
 function showToast(message, type = 'td') {
   const container = document.getElementById('toast-container');
-  if (!container) return;
-  const toast = document.createElement('div');
-  toast.className = 'toast ' + type;
-  toast.innerHTML = message;
-  toast.style.cursor = 'pointer';
-  toast.addEventListener('click', () => { toast.remove(); });
-  container.appendChild(toast);
+  if (container) {
+    const toast = document.createElement('div');
+    toast.className = 'toast ' + type;
+    toast.innerHTML = message;
+    toast.style.cursor = 'pointer';
+    toast.addEventListener('click', () => { toast.remove(); });
+    container.appendChild(toast);
+  }
+  logNotification(message, type);
 }
+
+// -- Notification log (persisted across sessions in localStorage) --
+const NOTIF_LOG_KEY = 'ff_notification_log';
+const NOTIF_LOG_SEEN_KEY = 'ff_notification_log_last_seen';
+const NOTIF_LOG_MAX = 200;
+
+function getNotifLog() {
+  try { return JSON.parse(localStorage.getItem(NOTIF_LOG_KEY) || '[]'); } catch { return []; }
+}
+
+function logNotification(message, type) {
+  try {
+    const log = getNotifLog();
+    log.unshift({ message, type, ts: Date.now() });
+    if (log.length > NOTIF_LOG_MAX) log.length = NOTIF_LOG_MAX;
+    localStorage.setItem(NOTIF_LOG_KEY, JSON.stringify(log));
+    updateNotifLogBadge();
+    const list = document.getElementById('notif-log-list');
+    if (list && document.getElementById('notif-log-panel')?.classList.contains('open')) {
+      renderNotifLog();
+    }
+  } catch {}
+}
+
+function clearNotifLog() {
+  try {
+    localStorage.setItem(NOTIF_LOG_KEY, '[]');
+    localStorage.setItem(NOTIF_LOG_SEEN_KEY, String(Date.now()));
+  } catch {}
+  renderNotifLog();
+  updateNotifLogBadge();
+}
+
+function updateNotifLogBadge() {
+  const badge = document.getElementById('notif-log-badge');
+  if (!badge) return;
+  const log = getNotifLog();
+  let lastSeen = 0;
+  try { lastSeen = parseInt(localStorage.getItem(NOTIF_LOG_SEEN_KEY) || '0', 10); } catch {}
+  const unread = log.filter(n => n.ts > lastSeen).length;
+  if (unread > 0) {
+    badge.textContent = unread > 99 ? '99+' : String(unread);
+    badge.style.display = 'flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function formatNotifTime(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  const d = new Date(ts);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+function renderNotifLog() {
+  const list = document.getElementById('notif-log-list');
+  if (!list) return;
+  const log = getNotifLog();
+  if (log.length === 0) {
+    list.innerHTML = '<div class="notif-log-empty">No notifications yet</div>';
+    return;
+  }
+  list.innerHTML = log.map(n =>
+    `<div class="notif-log-item ${n.type}"><span class="notif-log-item-msg">${n.message}</span><span class="notif-log-item-time">${formatNotifTime(n.ts)}</span></div>`
+  ).join('');
+}
+
+function toggleNotifLogPanel(e) {
+  if (e) e.stopPropagation();
+  const panel = document.getElementById('notif-log-panel');
+  if (!panel) return;
+  const opening = !panel.classList.contains('open');
+  panel.classList.toggle('open', opening);
+  if (opening) {
+    renderNotifLog();
+    try { localStorage.setItem(NOTIF_LOG_SEEN_KEY, String(Date.now())); } catch {}
+    updateNotifLogBadge();
+    const closeOnOutsideClick = (evt) => {
+      if (!panel.contains(evt.target) && evt.target.id !== 'notif-log-btn') {
+        panel.classList.remove('open');
+        document.removeEventListener('click', closeOnOutsideClick);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', closeOnOutsideClick), 0);
+  }
+}
+document.addEventListener('DOMContentLoaded', updateNotifLogBadge);
 
 function flashPlayerRow(playerName) {
   for (const row of document.querySelectorAll('.player-row .player-name')) {
