@@ -8032,6 +8032,17 @@ function getAudioCtx() {
   return _audioCtx;
 }
 
+// Unlock AudioContext on first real user gesture — timers/polling can't resume
+// a suspended context on their own (Safari in particular silently no-ops it).
+function _unlockAudioOnGesture() {
+  const ctx = getAudioCtx();
+  if (ctx.state === 'suspended') ctx.resume();
+  document.removeEventListener('click', _unlockAudioOnGesture);
+  document.removeEventListener('touchstart', _unlockAudioOnGesture);
+}
+document.addEventListener('click', _unlockAudioOnGesture, { once: true });
+document.addEventListener('touchstart', _unlockAudioOnGesture, { once: true });
+
 function playTone(freq, duration, type = 'sine', volume = 0.3) {
   if (!_audioEnabled) return;
   try {
@@ -8053,14 +8064,22 @@ function playTone(freq, duration, type = 'sine', volume = 0.3) {
 function toggleAudio() {
   _audioEnabled = !_audioEnabled;
   try { localStorage.setItem('ff_audio_alerts', _audioEnabled); } catch {}
-  // Create AudioContext on user gesture if needed
-  const ctx = getAudioCtx();
-  if (ctx.state === 'suspended') ctx.resume();
   updateAudioToggle();
-  if (_audioEnabled) {
+  if (!_audioEnabled) return;
+  // Force a fresh AudioContext tied to this click — a context created earlier
+  // outside a user gesture (e.g. from a background timer) can get stuck
+  // permanently suspended in Safari and never recover via resume().
+  if (_audioCtx && _audioCtx.state !== 'running') {
+    try { _audioCtx.close(); } catch {}
+    _audioCtx = null;
+  }
+  const ctx = getAudioCtx();
+  ctx.resume().then(() => {
     playTDAlert();
     showToast('&#128264; Audio alerts ON — you should hear a test sound', 'score');
-  }
+  }).catch(() => {
+    showToast('&#9888;&#65039; Audio blocked by the browser/device — on iPhone, check the physical silent switch', 'score');
+  });
 }
 
 function updateAudioToggle() {
