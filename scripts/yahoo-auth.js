@@ -17,14 +17,28 @@ const path = require('path');
 const { URL } = require('url');
 const { execSync } = require('child_process');
 
-const CLIENT_ID =
-  'REDACTED_YAHOO_CLIENT_ID';
-const CLIENT_SECRET = 'REDACTED_YAHOO_CLIENT_SECRET';
 const REDIRECT_URI = 'https://localhost:3002';
 const SCOPE = 'fspt-w';
 
 const CREDS_PATH = path.join(__dirname, '..', 'credentials.json');
 const CERT_DIR = path.join(__dirname, '..', '.certs');
+
+let existingCreds = {};
+try {
+  existingCreds = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
+} catch { /* first run */ }
+
+const CLIENT_ID = process.env.YAHOO_CLIENT_ID || existingCreds.yahoo_client_id;
+const CLIENT_SECRET = process.env.YAHOO_CLIENT_SECRET || existingCreds.yahoo_client_secret;
+
+if (!CLIENT_ID || !CLIENT_SECRET) {
+  console.error(
+    'Missing Yahoo client credentials.\n' +
+    'Set YAHOO_CLIENT_ID and YAHOO_CLIENT_SECRET env vars, or add\n' +
+    '"yahoo_client_id" / "yahoo_client_secret" to credentials.json first.'
+  );
+  process.exit(1);
+}
 
 // ── Generate self-signed cert ───────────────────────────────────────
 function ensureCerts() {
